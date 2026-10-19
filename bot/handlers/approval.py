@@ -7,13 +7,14 @@ import logging
 from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
+from bot.access import Access
 from bot.config import Config
 from bot.service import PostService
 
 log = logging.getLogger(__name__)
 
 
-def register(app: Application, cfg: Config, svc: PostService) -> None:
+def register(app: Application, cfg: Config, svc: PostService, access: Access) -> None:
     async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         q = update.callback_query
         if q is None:
@@ -21,7 +22,7 @@ def register(app: Application, cfg: Config, svc: PostService) -> None:
         if q.message is None or q.message.chat.id != cfg.approval_group_id:
             await q.answer()  # buttons from any other chat are ignored
             return
-        if not cfg.can_approve(q.from_user.id):
+        if not access.can_approve(q.from_user.id):
             await q.answer("Aapko approve/reject karne ki permission nahi hai.", show_alert=True)
             return
         action, _, raw_id = (q.data or "").partition(":")

@@ -78,11 +78,17 @@ Script har chat ki `ID  TYPE  TITLE` print karegi. `-100...` wali IDs `.env` mei
 > Bot chal raha ho to bhi IDs mil sakti hain: group mein `/id` bhejo, ya channel mein `/id` post karo – bot
 > owner ko DM mein channel ID bhej dega aur `/id` post delete kar dega.
 
-### 5. Authorized admins
-Unhe channel join karne ki zaroorat **nahi** hai. Bas:
-1. Bot ko DM mein ek baar `/start` dabayein (warna bot unhe message nahi kar sakta).
-2. Agar bot "authorized nahi ho" bole to wo user ID owner ko bhejein → owner `SUBMITTER_IDS` mein add kare
-   (GitHub pe secret update karo, phir bot restart).
+### 5. Naye users ko access dena (bina GitHub secret badle)
+Unhe channel join karne ki zaroorat **nahi** hai.
+1. Naya user bot ko DM mein `/start` (ya koi bhi message) bheje.
+2. Owner ko turant DM aata hai: **🙋 Access request** – naam, @username, ID ke saath, aur buttons:
+   **✅ Post access** · **👮 Approver** · **🤝 Dono** · **❌ Ignore**. Ek tap – ho gaya.
+3. User ko message jata hai ki access mil gaya; ab wo DM mein post bhej sakta hai.
+4. Ya command se: `/adduser <user_id> [post|approve|both]`, hatane ke liye `/removeuser <user_id>`, list: `/users`.
+
+Ye access MongoDB mein save hota hai (restart pe bhi rehta hai). `SUBMITTER_IDS` / `APPROVER_IDS` secrets
+wale users bhi chalte rehte hain – unhe hatane ke liye secret hi badalna padega.
+Approver ko approval group ka member bhi hona chahiye (buttons wahi hain).
 
 ### 6. Local test
 ```bash
@@ -135,6 +141,9 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 | `/retry <id>` | owner | failed / needs_review post wapas queue mein |
 | `/pause`, `/resume` | owner | publishing roko/chalu karo, queue safe rehti hai |
 | `/setinterval <min> <max>` | owner | `/setinterval 20 30` – agle publish ke baad se lagu |
+| `/adduser <user_id> [post\|approve\|both]` | owner | `/adduser 123456789` (post), `/adduser 123456789 approve`. Group mein kisi ke message pe reply karke `/adduser approve` bhi chalta hai |
+| `/removeuser <user_id> [post\|approve\|both]` | owner | bot se diya hua access hatao (default: dono) |
+| `/users` | owner | kis kis ke paas access hai (bot se diye + env/secret wale) |
 
 Status: ⏳ pending · 🗓 scheduled · 🚀 publishing · ✅ published · ❌ rejected · 🚫 cancelled · ⚠️ failed ·
 🔍 needs_review

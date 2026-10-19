@@ -11,7 +11,9 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot import texts
+from bot.access import ROLES, Access
 from bot.config import Config
+from bot.handlers.access import AccessRequests, granted_text
 from bot.service import PostService
 from bot.utils import h
 
@@ -41,13 +43,26 @@ def _post_id(args: list[str]) -> int | None:
         return None
 
 
-def register(app: Application, cfg: Config, svc: PostService) -> None:
+def _target(update: Update, args: list[str], default_role: str) -> tuple[int | None, str | None]:
+    """'/adduser 123 approve' or reply to someone's message with '/adduser approve'."""
+    uid: int | None = None
+    if args and args[0].lstrip("-").isdigit():
+        uid, args = int(args[0]), args[1:]
+    else:
+        reply = update.effective_message.reply_to_message if update.effective_message else None
+        if reply and reply.from_user and not reply.from_user.is_bot:
+            uid = reply.from_user.id
+    role = (args[0].lower() if args else default_role)
+    return uid, (role if role in ROLES else None)
+
+
+def register(app: Application, cfg: Config, svc: PostService, access: Access, requests: AccessRequests) -> None:
     def allowed(role: str, uid: int) -> bool:
         return {
             "any": True,
-            "staff": cfg.is_staff(uid),
-            "approver": cfg.can_approve(uid),
-            "owner": cfg.is_owner(uid),
+            "staff": access.is_staff(uid),
+            "approver": access.can_approve(uid),
+            "owner": access.is_owner(uid),
         }[role]
 
     def command(name: str, role: str, *, anywhere: bool = False) -> Callable[[Handler], Handler]:
@@ -75,7 +90,8 @@ def register(app: Application, cfg: Config, svc: PostService) -> None:
     @command("start", "any")
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid = update.effective_user.id
-        if update.effective_chat.type == ChatType.PRIVATE and not cfg.is_staff(uid):
+        if update.effective_chat.type == ChatType.PRIVATE and not access.is_staff(uid):
+            await requests.request(update.effective_user)
             await reply(update, texts.unauthorized_text(uid))
             return
         mn, mx = await svc.interval()
@@ -185,6 +201,52 @@ def register(app: Application, cfg: Config, svc: PostService) -> None:
             return
         await svc.set_interval(mn, mx)
         await reply(update, f"⏱ Interval ab {mn:g}–{mx:g} min. Agle publish ke baad se lagu hoga.")
+
+    @command("adduser", "owner")
+    async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        uid, role = _target(update, context.args or [], "post")
+        if uid is None or role is None:
+            await reply(update, "Use: /adduser &lt;user_id&gt; [post|approve|both]\n"
+                                "(ya kisi ke message pe reply karke: /adduser approve)\n"
+                                "User ID ke liye us user se bot ko /id bhejwao.")
+            return
+        roles = ROLES[role]
+        new = await access.grant(uid, roles)
+        if not new:
+            await reply(update, f"ℹ️ <code>{uid}</code> ke paas ye access pehle se hai.")
+            return
+        await reply(update, f"✅ <code>{uid}</code> ko access mila: {', '.join(new)}")
+        await svc.send(uid, granted_text(new))
+
+    @command("removeuser", "owner")
+    async def removeuser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        uid, role = _target(update, context.args or [], "both")
+        if uid is None or role is None:
+            await reply(update, "Use: /removeuser &lt;user_id&gt; [post|approve|both]")
+            return
+        removed, from_env = await access.revoke(uid, ROLES[role])
+        lines = []
+        if removed:
+            lines.append(f"🗑 <code>{uid}</code> se access hata diya: {', '.join(removed)}")
+        if from_env:
+            lines.append(f"⚠️ {', '.join(from_env)} access env/GitHub secret (SUBMITTER_IDS / APPROVER_IDS / "
+                         "OWNER_ID) se aata hai – wahan se hatao, phir bot restart.")
+        await reply(update, "\n".join(lines) or f"ℹ️ <code>{uid}</code> ke paas bot se diya hua koi access nahi tha.")
+
+    @command("users", "owner")
+    async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        s = access.summary()
+
+        def ids(xs: list[int]) -> str:
+            return ", ".join(f"<code>{x}</code>" for x in xs) or "-"
+
+        await reply(update, "👥 <b>Access list</b>\n"
+                            f"👑 Owner: <code>{cfg.owner_id}</code>\n\n"
+                            f"📤 Post (bot se diye): {ids(s['added_submitters'])}\n"
+                            f"👮 Approve (bot se diye): {ids(s['added_approvers'])}\n\n"
+                            f"📤 Post (env/secret): {ids(s['env_submitters'])}\n"
+                            f"👮 Approve (env/secret): {ids(s['env_approvers'])}\n\n"
+                            "Hatane ke liye: /removeuser &lt;user_id&gt;")
 
     # /id posted inside a channel: DM the owner instead of answering in the channel, then tidy up
     async def channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

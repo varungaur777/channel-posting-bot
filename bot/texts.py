@@ -116,14 +116,15 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/approve &lt;id&gt; · /reject &lt;id&gt; [reason] – approvers ke liye\n"
         "/cancel &lt;id&gt; – apna pending/scheduled post cancel karo\n\n"
         "<b>Owner only:</b>\n"
-        "/retry &lt;id&gt; · /pause · /resume · /setinterval &lt;min&gt; &lt;max&gt;"
+        "/retry &lt;id&gt; · /pause · /resume · /setinterval &lt;min&gt; &lt;max&gt;\n"
+        "/adduser &lt;user_id&gt; [post|approve|both] · /removeuser &lt;user_id&gt; [post|approve|both] · /users"
     )
 
 
 def unauthorized_text(user_id: int) -> str:
     return (f"🙏 Aap is bot ko use karne ke liye authorized nahi ho.\n"
             f"Aapka user ID: <code>{user_id}</code>\n"
-            "Ye ID owner ko bhejo agar access chahiye.")
+            "🙋 Owner ko aapki access request bhej di gayi hai – approve hone pe yahin message aayega.")
 
 
 BOT_COMMANDS = [
@@ -141,4 +142,7 @@ BOT_COMMANDS = [
     ("pause", "Owner: publishing roko"),
     ("resume", "Owner: publishing chalu karo"),
     ("setinterval", "Owner: /setinterval <min> <max>"),
+    ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
+    ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
+    ("users", "Owner: kis kis ke paas access hai"),
 ]

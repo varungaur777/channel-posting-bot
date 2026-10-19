@@ -11,7 +11,9 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from bot import texts
+from bot.access import Access
 from bot.config import Config
+from bot.handlers.access import AccessRequests
 from bot.service import PostService
 
 log = logging.getLogger(__name__)
@@ -64,18 +66,23 @@ class AlbumBuffer:
             task.add_done_callback(self._tasks.discard)
 
 
-def register(app: Application, cfg: Config, svc: PostService, albums: AlbumBuffer) -> None:
+def register(app: Application, cfg: Config, svc: PostService, albums: AlbumBuffer, access: Access,
+             requests: AccessRequests) -> None:
     seen_unauthorized_groups: set[str] = set()
 
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg, user = update.effective_message, update.effective_user
         if msg is None or user is None:
             return
-        if not cfg.can_submit(user.id):
+        if not access.can_submit(user.id):
             if msg.media_group_id:
                 if msg.media_group_id in seen_unauthorized_groups:
                     return
                 seen_unauthorized_groups.add(msg.media_group_id)
+            if access.can_approve(user.id):
+                await msg.reply_text("ℹ️ Aap approver ho, post bhejne ka access nahi hai. Owner se maango.")
+                return
+            await requests.request(user)
             await msg.reply_text(texts.unauthorized_text(user.id), parse_mode=ParseMode.HTML)
             return
         if msg.media_group_id:
@@ -85,7 +92,7 @@ def register(app: Application, cfg: Config, svc: PostService, albums: AlbumBuffe
 
     async def on_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg, user = update.edited_message, update.effective_user
-        if msg is None or user is None or not cfg.can_submit(user.id):
+        if msg is None or user is None or not access.can_submit(user.id):
             return
         await svc.handle_edit(msg)
 

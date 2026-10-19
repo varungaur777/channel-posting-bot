@@ -21,6 +21,7 @@ from telegram.error import InvalidToken
 from telegram.ext import Application, ContextTypes
 
 from bot import __version__, texts
+from bot.access import Access
 from bot.config import Config, ConfigError, load_config
 from bot.db import Database
 from bot.handlers import register_all
@@ -79,10 +80,12 @@ async def run(cfg: Config) -> int:
         else:
             log.warning("JSON store: instance lease skipped - run only ONE copy of the bot")
 
+        access = Access(cfg, db)
+        await access.load()
         app = build_application(cfg)
         svc = PostService(cfg, db, app.bot)
         albums = AlbumBuffer(cfg.album_wait_seconds, lambda msgs: svc.submit(msgs[0].from_user, msgs))
-        register_all(app, cfg, svc, albums)
+        register_all(app, cfg, svc, albums, access)
         app.add_error_handler(_on_error)
         scheduler = Scheduler(svc, cfg.tick_seconds)
 
