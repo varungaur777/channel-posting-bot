@@ -1,0 +1,32 @@
+# GitHub disables scheduled workflows after 60 days without repository activity.
+# Once a week this re-enables (= keeps alive) bot.yml and itself, but never touches a workflow
+# that you disabled by hand (state "disabled_manually"), so "Disable workflow" still stops the bot.
+
+name: keepalive
+
+on:
+  schedule:
+    - cron: "30 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Keep workflows enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in bot.yml keepalive.yml; do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf" --jq .state)
+            echo "$wf: $state"
+            case "$state" in
+              active|disabled_inactivity)
+                gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/enable" && echo "  kept alive" ;;
+              *) echo "  left alone" ;;
+            esac
+          done

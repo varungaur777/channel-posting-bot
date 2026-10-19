@@ -1,0 +1,183 @@
+# Channel Posting Bot 🤖📢
+
+Telegram bot jo authorized admins se DM mein post leta hai, private **approval group** mein approve/reject
+karwata hai, aur approved posts ko **target channel** mein ek random gap (default 10–15 min) ke saath
+publish karta hai. Sab kuch `copyMessage` se hota hai, isliye kahin bhi "Forwarded from" nahi aata.
+
+- Telegram ka private **storage channel** = files ka permanent store (source of truth)
+- **MongoDB** = sirf index (file_id, message ids, status) – files kabhi DB mein nahi jaati
+- **GitHub Actions** pe 24/7 (har ~6 ghante auto-restart), ya Docker / systemd pe VPS
+
+> ⚠️ **Zaroori note (GitHub Actions):** GitHub ke terms ke hisaab se Actions repo ke build/test/deploy ke
+> liye hain, 24/7 hosting ke liye nahi. Bot chal jayega, lekin GitHub kabhi bhi aise long-running workflows
+> ko rok sakta hai ya account pe action le sakta hai. Long-term ke liye sasta VPS + Docker
+> ([deploy/](deploy/)) sabse safe option hai.
+
+Flow aur internals: [ARCHITECTURE.md](ARCHITECTURE.md)
+
+---
+
+## Defaults (jo maine chune hain)
+
+| Setting | Default |
+|---|---|
+| Interval | random 10–15 min (`MIN_INTERVAL_MIN` / `MAX_INTERVAL_MIN`, ya `/setinterval`) |
+| Pehla post | turant publish |
+| Album wait | 2.5 s (`ALBUM_WAIT_SECONDS`) |
+| Scheduler tick | 20 s |
+| Retries | network error pe 5 retry, backoff 1, 2, 4, 8, 16 min (max 30) |
+| Duplicate window | 30 din (`DUP_WINDOW_DAYS`) |
+| Time zone | Asia/Kolkata (DB mein UTC) |
+| DB name | `channel_poster_bot` |
+| Lease | heartbeat 30 s, expiry 2 min |
+| GitHub run | 340 min bot, 355 min job timeout, phir next run |
+| Python | 3.12, python-telegram-bot 21.11.1, Motor 3.7 |
+| `/setinterval` | DB mein save hota hai aur env values ko override karta hai |
+
+---
+
+## Setup – step by step
+
+### 1. BotFather se bot banao
+1. Telegram mein [@BotFather](https://t.me/BotFather) kholo → `/newbot` → naam aur username do.
+2. Jo **token** mile (`123456:ABC...`) wo `BOT_TOKEN` hai. Kisi ko mat dikhana.
+3. (Optional) `/setprivacy` → Enable rehne do. Bot ko commands group mein phir bhi milti hain.
+
+### 2. MongoDB Atlas (naya, free)
+1. <https://cloud.mongodb.com> pe login → **New Project** (is bot ke liye alag project).
+2. **Create cluster** → **M0 Free** → koi bhi region (Mumbai `ap-south-1` accha hai).
+3. **Database Access** → *Add New Database User* → username + strong password (password mein `@ : / ?` ho to
+   URL-encode karna padega, isliye sirf letters/numbers rakho).
+4. **Network Access** → *Add IP Address* → `0.0.0.0/0` (GitHub Actions ka IP fixed nahi hota).
+5. **Connect** → *Drivers* → Python → connection string copy karo, `<password>` replace karo:
+   `mongodb+srv://user:pass@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority` → ye `MONGO_URL` hai.
+
+### 3. Group aur channels banao
+1. **Approval group** (private): New Group banao. Pehle hi **supergroup** bana lo (Group settings →
+   *Chat history for new members* → **Visible** kar do; isse group supergroup ban jata hai) – kyunki upgrade pe
+   group ki ID badal jaati hai. Bot ko group mein add karo. Approvers ko bhi add karo.
+2. **Storage channel** (private): New Channel → Private. Bot ko **admin** banao, sirf ye permissions:
+   ✅ *Post Messages* ✅ *Delete Messages* (baaki off). Yahan aur kisi ko admin mat banao.
+3. **Target channel**: jahan posts jaane hain. Bot ko admin banao: ✅ *Post Messages* ✅ *Delete Messages*.
+
+### 4. IDs nikalo (`tools/get_ids.py`)
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env        # BOT_TOKEN bhar do
+python tools/get_ids.py     # 180 sec tak sunta hai
+```
+Jab tak ye chal raha hai:
+- approval group mein `/id` bhejo,
+- storage channel mein kuch bhi post karo,
+- target channel mein kuch bhi post karo (baad mein delete kar dena).
+
+Script har chat ki `ID  TYPE  TITLE` print karegi. `-100...` wali IDs `.env` mein daalo:
+`APPROVAL_GROUP_ID`, `STORAGE_CHANNEL_ID`, `CHANNEL_ID`. Apna user ID bot ko DM mein `/id` bhej ke milta hai.
+
+> Bot chal raha ho to bhi IDs mil sakti hain: group mein `/id` bhejo, ya channel mein `/id` post karo – bot
+> owner ko DM mein channel ID bhej dega aur `/id` post delete kar dega.
+
+### 5. Authorized admins
+Unhe channel join karne ki zaroorat **nahi** hai. Bas:
+1. Bot ko DM mein ek baar `/start` dabayein (warna bot unhe message nahi kar sakta).
+2. Agar bot "authorized nahi ho" bole to wo user ID owner ko bhejein → owner `SUBMITTER_IDS` mein add kare
+   (GitHub pe secret update karo, phir bot restart).
+
+### 6. Local test
+```bash
+python -m bot               # Ctrl+C se band
+pytest -q && ruff check .   # tests + lint
+```
+
+### 7. GitHub Actions pe 24/7
+1. Repo **public** rakho (private repo ko sirf 2000 free minutes/month milte hain).
+2. Settings → *Secrets and variables* → *Actions* → **Secrets**: `BOT_TOKEN`, `OWNER_ID`, `SUBMITTER_IDS`,
+   `APPROVER_IDS`, `APPROVAL_GROUP_ID`, `STORAGE_CHANNEL_ID`, `CHANNEL_ID`, `MONGO_URL`, `MONGO_DB_NAME`.
+   **Variables** (optional): `MIN_INTERVAL_MIN`, `MAX_INTERVAL_MIN`, `TZ_NAME`, `NOTIFY_RESTART`.
+   CLI se: `gh secret set BOT_TOKEN` (value paste karo), `gh variable set TZ_NAME --body Asia/Kolkata`.
+3. Settings → Actions → General → *Workflow permissions* → **Read and write** (self-restart ke liye).
+4. Actions → **bot** → *Run workflow*. Ya: `gh workflow run bot.yml`.
+
+### Logs kaise dekhein
+- GitHub: Actions → **bot** → running run → *Run the bot* step. CLI: `gh run list --workflow bot.yml`,
+  phir `gh run view <id> --log` (ya `gh run watch`).
+- Local/VPS: terminal + `logs/bot.log` (rotating). Docker: `docker compose -f deploy/docker-compose.yml logs -f`.
+
+### Bot band kaise karein
+1. Actions → **bot** → `...` → **Disable workflow** (`gh workflow disable bot.yml`)
+2. Phir chal raha run **Cancel** karo (`gh run cancel <id>`). Cancelled run agla run start nahi karta.
+
+Wapas chalu: `gh workflow enable bot.yml && gh workflow run bot.yml`.
+
+### Code update kaise karein
+`main` pe push karo → naya run queue mein lag jata hai (concurrency ki wajah se purana chalta rehta hai).
+Turant naya code chahiye to purana run cancel kar do – queued run naye code ke saath start hoga.
+Bot ko SIGTERM milta hai, wo gracefully band hota hai aur lease chhod deta hai.
+
+---
+
+## Commands
+
+Commands bot ke DM aur approval group dono mein chalti hain (permission check ke saath).
+
+| Command | Kaun | Example / kaam |
+|---|---|---|
+| `/start`, `/help` | sab | usage (Hinglish). Unauthorized user ko uska user ID dikhta hai |
+| `/id` | sab | `/id` → chat ID + aapka user ID |
+| `/stats` | staff | har status ka count, interval, next slot, paused? |
+| `/queue` | staff | scheduled posts order mein, ETA ke saath |
+| `/list <status> [n]` | staff | `/list scheduled 20`, `/list failed`, `/list all` |
+| `/post <id>` | staff | `/post 12` → details, retries, last error; DM mein storage se preview bhi |
+| `/approve <id>` | approvers | `/approve 12` |
+| `/reject <id> [reason]` | approvers | `/reject 12 image blur hai` – reason submitter ko jata hai |
+| `/cancel <id>` | owner / post ka submitter | sirf pending/scheduled post |
+| `/retry <id>` | owner | failed / needs_review post wapas queue mein |
+| `/pause`, `/resume` | owner | publishing roko/chalu karo, queue safe rehti hai |
+| `/setinterval <min> <max>` | owner | `/setinterval 20 30` – agle publish ke baad se lagu |
+
+Status: ⏳ pending · 🗓 scheduled · 🚀 publishing · ✅ published · ❌ rejected · 🚫 cancelled · ⚠️ failed ·
+🔍 needs_review
+
+**Post kaise bhejein:** bot ko DM mein kuch bhi bhejo – text (formatting ke saath), photo, video, GIF,
+document, audio, voice, video note, sticker, poll, location, album. Album ek hi post banta hai.
+Bhejne ke baad edit karna track nahi hota – `/cancel <id>` karke dobara bhejo.
+
+---
+
+## Troubleshooting
+
+| Problem | Hal |
+|---|---|
+| **409 Conflict** (`terminated by other getUpdates request`) | Bot ki do copies chal rahi hain (GitHub + local, ya `get_ids.py`). Ek band karo. Lease 2 min mein free ho jata hai; doosri copy apne aap wait karti hai. |
+| Bot channel mein post nahi kar raha | Bot target channel ka **admin** hai? *Post Messages* on hai? `CHANNEL_ID` `-100...` wali hai? `/post <id>` mein last error dekho. Fix karke `/retry <id>`. |
+| `Chat not found` | ID galat hai, ya bot us chat mein nahi hai. `tools/get_ids.py` se dobara ID lo. Group supergroup bana to ID badal jaati hai (bot owner ko nayi ID bhejta hai). |
+| Workflow ruk gaya | Actions tab mein dekho: disabled to nahi? Settings → Actions → *Read and write* permission? Cron har 6 ghante backup start karta hai. Manual: `gh workflow run bot.yml`. |
+| Flood wait (429) | Telegram ne rate limit kiya. Bot khud diya hua time wait karta hai, retry count nahi badhta. Kuch karne ki zaroorat nahi. |
+| Mongo connection error | `MONGO_URL` sahi hai? Password special characters URL-encoded hain? Atlas Network Access mein `0.0.0.0/0` hai? Cluster paused to nahi? |
+| Post `needs_review` | Publish ke time timeout hua ya bot band hua – post shayad channel mein aa chuka ho. Channel check karo; nahi aaya to `/retry <id>`. |
+| Admin ko notifications nahi aate | Usne bot ko DM mein `/start` nahi kiya, ya bot block kiya hai. |
+
+---
+
+## Project structure
+
+```
+bot/            main.py (startup/shutdown) · config.py · db.py · jsonstore.py (local fallback)
+                storage.py (copy/rollback/rebuild) · lease.py · scheduler.py · service.py (lifecycle)
+                texts.py (Hinglish texts) · utils.py · handlers/{submit,approval,admin}.py
+tools/get_ids.py
+tests/          pytest (Telegram mocked, mongomock-motor + JSON store)
+deploy/         Dockerfile · docker-compose.yml · channel-posting-bot.service
+.github/workflows/  bot.yml (24/7) · ci.yml (ruff + pytest) · keepalive.yml
+```
+
+## Docker / VPS
+```bash
+cp .env.example .env   # fill in
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+systemd ke liye [deploy/channel-posting-bot.service](deploy/channel-posting-bot.service) ke comments follow
+karo. VPS pe chalao to GitHub workflow **disable** kar do – ek time pe ek hi copy chalni chahiye.
+
+License: MIT

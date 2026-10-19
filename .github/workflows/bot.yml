@@ -1,0 +1,109 @@
+# Runs the bot 24/7 on GitHub Actions as a chain of ~6 hour runs.
+#
+# - One job runs the bot; the bot stops itself gracefully after MAX_RUNTIME_MINUTES (340), well before
+#   timeout-minutes (355), releasing its MongoDB instance lease.
+# - The last step (if: always()) starts the next run with `gh workflow run`. GITHUB_TOKEN may trigger
+#   workflow_dispatch (that is the one event it is allowed to start).
+# - `concurrency` keeps exactly one run polling Telegram; extra runs wait in the queue.
+# - The cron below is only a backup in case the chain breaks.
+#
+# Stop the bot:   Actions -> bot -> "..." -> Disable workflow, then cancel the running run
+#                 (a cancelled run does NOT start the next one).
+# Secrets:        BOT_TOKEN, OWNER_ID, SUBMITTER_IDS, APPROVER_IDS, APPROVAL_GROUP_ID, STORAGE_CHANNEL_ID,
+#                 CHANNEL_ID, MONGO_URL, MONGO_DB_NAME
+# Variables:      MIN_INTERVAL_MIN, MAX_INTERVAL_MIN, TZ_NAME, NOTIFY_RESTART (all optional)
+
+name: bot
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
+      - "deploy/**"
+      - "tests/**"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/keepalive.yml"
+  schedule:
+    - cron: "0 */6 * * *"
+
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: false
+
+permissions:
+  actions: write   # start the next run
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -q -r requirements.txt
+
+      - name: Run the bot
+        id: bot
+        env:
+          RUNTIME_PROFILE: github_actions
+          PYTHONUNBUFFERED: "1"
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          OWNER_ID: ${{ secrets.OWNER_ID }}
+          SUBMITTER_IDS: ${{ secrets.SUBMITTER_IDS }}
+          APPROVER_IDS: ${{ secrets.APPROVER_IDS }}
+          APPROVAL_GROUP_ID: ${{ secrets.APPROVAL_GROUP_ID }}
+          STORAGE_CHANNEL_ID: ${{ secrets.STORAGE_CHANNEL_ID }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          MONGO_URL: ${{ secrets.MONGO_URL }}
+          MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+          MIN_INTERVAL_MIN: ${{ vars.MIN_INTERVAL_MIN }}
+          MAX_INTERVAL_MIN: ${{ vars.MAX_INTERVAL_MIN }}
+          TZ_NAME: ${{ vars.TZ_NAME }}
+          NOTIFY_RESTART: ${{ vars.NOTIFY_RESTART }}
+        run: |
+          if [ -z "$MONGO_URL" ]; then echo "::error::MONGO_URL secret is required on GitHub Actions"; fi
+          budget=340          # minutes for this whole job; the bot exits gracefully when it is used up
+          start=$(date +%s)
+          crashes=0
+          while true; do
+            used=$(( ($(date +%s) - start) / 60 ))
+            left=$(( budget - used ))
+            if [ "$left" -lt 3 ]; then code=0; break; fi
+            code=0
+            MAX_RUNTIME_MINUTES=$left python -m bot || code=$?
+            echo "bot exited with code $code"
+            # 1 = crash: restart a few times; 0 = normal stop; 2 = bad configuration
+            if [ "$code" = 1 ] && [ "$crashes" -lt 3 ]; then crashes=$((crashes + 1)); sleep 30; continue; fi
+            break
+          done
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "minutes=$(( ($(date +%s) - start) / 60 ))" >> "$GITHUB_OUTPUT"
+          if [ "$code" = 2 ]; then echo "::error::configuration error - fix the secrets"; exit 1; fi
+
+      - name: Start the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          BOT_CODE: ${{ steps.bot.outputs.code }}
+          BOT_MINUTES: ${{ steps.bot.outputs.minutes }}
+        run: |
+          if [ "$JOB_STATUS" = "cancelled" ]; then echo "run was cancelled - not starting another one"; exit 0; fi
+          if [ "$BOT_CODE" = "2" ]; then echo "configuration error - not restarting (cron retries every 6 h)"; exit 0; fi
+          if [ -n "$BOT_MINUTES" ] && [ "$BOT_MINUTES" -lt 5 ]; then
+            echo "short run ($BOT_MINUTES min) - waiting 2 min to avoid a restart loop"; sleep 120
+          fi
+          gh workflow run bot.yml -R "$GITHUB_REPOSITORY" --ref "${{ github.event.repository.default_branch }}" \
+            && echo "next run requested" \
+            || echo "::warning::could not start the next run (workflow disabled?) - cron is the backup"

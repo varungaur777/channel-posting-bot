@@ -1,0 +1,30 @@
+# systemd unit for a VPS (Ubuntu/Debian).
+#   sudo useradd -r -m -d /opt/channel-posting-bot botuser
+#   sudo -u botuser git clone https://github.com/varungaur777/channel-posting-bot /opt/channel-posting-bot
+#   cd /opt/channel-posting-bot && sudo -u botuser python3.12 -m venv .venv
+#   sudo -u botuser .venv/bin/pip install -r requirements.txt
+#   sudo -u botuser cp .env.example .env && sudo -u botuser nano .env
+#   sudo cp deploy/channel-posting-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now channel-posting-bot
+#   journalctl -u channel-posting-bot -f
+[Unit]
+Description=Telegram channel posting bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/channel-posting-bot
+Environment=RUNTIME_PROFILE=persistent
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/channel-posting-bot/.venv/bin/python -m bot
+Restart=always
+RestartSec=10
+# exit code 2 = bad configuration: do not restart-loop
+RestartPreventExitStatus=2
+KillSignal=SIGTERM
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
