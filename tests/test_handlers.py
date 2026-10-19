@@ -124,7 +124,7 @@ async def test_access_request_flow(cfg, svc, bot, access) -> None:
     upd, q = owner_click(f"acc:post:{STRANGER}")
     await on_button(upd, None)
     assert access.can_submit(STRANGER) and not access.can_approve(STRANGER)
-    assert any("access mil gaya" in t for t in bot.texts_to(STRANGER))
+    assert any("You have been given access" in t for t in bot.texts_to(STRANGER))
     q.edit_message_text.assert_awaited()
 
 
@@ -134,3 +134,12 @@ async def test_ignore_request_grants_nothing(cfg, svc, bot, access) -> None:
     upd, _ = owner_click(f"acc:no:{STRANGER}")
     await app.handlers[0].callback(upd, None)
     assert not access.is_staff(STRANGER)
+
+
+async def test_post_now_button(button, bot, db) -> None:
+    upd, q = click("pn:1", APPROVER)
+    await button(upd, None)
+    assert (await db.get_post(1))["status"] == "published"
+    upd, q = click("pn:1", STRANGER)
+    await button(upd, None)
+    assert q.answer.await_args.kwargs.get("show_alert") is True  # not an approver

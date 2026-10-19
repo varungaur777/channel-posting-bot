@@ -34,7 +34,7 @@ async def test_first_post_immediate_then_gap(svc, bot, db, clock) -> None:
     assert bot.sent_to(CHANNEL) == [{"text": "one"}, {"text": "two"}]
     post = await db.get_post(1)
     assert post["status"] == PUBLISHED and post["channel_message_ids"]
-    assert any("publish ho gaya" in t for t in bot.texts_to(ADMIN))
+    assert any("has been published" in t for t in bot.texts_to(ADMIN))
 
 
 async def test_gap_never_below_min(svc, bot, db, clock) -> None:
@@ -211,3 +211,43 @@ async def test_tick_ignores_claimed_posts(svc, bot, db, status_before) -> None:
     await approved_post(svc, bot, "x")
     await db.transition(1, [APPROVED], status_before)
     assert await svc.tick() is None
+
+
+# ---- post now ------------------------------------------------------------------------------------
+
+
+async def test_post_now_skips_gap_from_pending(svc, bot, db, clock) -> None:
+    await approved_post(svc, bot, "regular")
+    assert await svc.tick() == 1  # regular post -> next slot 10-15 min away
+    slot = (await db.get_state())["next_publish_at"]
+    await svc.submit(user(ADMIN), [text_msg(ADMIN, "breaking news", bot)])  # still pending
+    clock.advance(minutes=1)
+    ok, text = await svc.publish_now(2, user(APPROVER))
+    assert ok and "published now" in text
+    post = await db.get_post(2)
+    assert post["status"] == "published" and post["posted_now"] and post["decided_by"] == APPROVER
+    assert bot.sent_to(CHANNEL)[-1] == {"text": "breaking news"}
+    new_slot = (await db.get_state())["next_publish_at"]
+    assert new_slot >= slot  # queue never moves earlier
+    assert new_slot - clock.now >= timedelta(minutes=10)  # and waits a full gap after the urgent post
+
+
+async def test_post_now_scheduled_post_ignores_pause_and_backoff(svc, bot, db) -> None:
+    await approved_post(svc, bot, "x")
+    bot.fail["copy_message"].append(NetworkError("blip"))
+    await svc.tick()  # now in backoff
+    await svc.set_paused(True)
+    ok, _ = await svc.publish_now(1, user(OWNER))
+    assert ok and (await db.get_post(1))["status"] == "published"
+
+
+async def test_post_now_refuses_rejected_and_reports_failure(svc, bot, db) -> None:
+    await svc.submit(user(ADMIN), [text_msg(ADMIN, "no", bot)])
+    await svc.reject(1, user(APPROVER))
+    ok, text = await svc.publish_now(1, user(OWNER))
+    assert not ok and "Rejected" in text
+    assert bot.sent_to(CHANNEL) == []
+    await approved_post(svc, bot, "y")
+    bot.fail["copy_message"].append(Forbidden("bot is not an admin"))
+    ok, text = await svc.publish_now(2, user(OWNER))
+    assert not ok and "Failed" in text

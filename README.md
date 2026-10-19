@@ -137,6 +137,7 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 | `/post <id>` | staff | `/post 12` → details, retries, last error; DM mein storage se preview bhi |
 | `/approve <id>` | approvers | `/approve 12` |
 | `/reject <id> [reason]` | approvers | `/reject 12 image blur hai` – reason submitter ko jata hai |
+| `/postnow <id>` | approvers | `/postnow 12` – gap skip karke **turant** publish (pending ho to pehle approve). Pause aur backoff bhi ignore hota hai. Agla regular post iske baad normal gap pe jayega |
 | `/cancel <id>` | owner / post ka submitter | sirf pending/scheduled post |
 | `/retry <id>` | owner | failed / needs_review post wapas queue mein |
 | `/pause`, `/resume` | owner | publishing roko/chalu karo, queue safe rehti hai |
@@ -147,6 +148,12 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 
 Status: ⏳ pending · 🗓 scheduled · 🚀 publishing · ✅ published · ❌ rejected · 🚫 cancelled · ⚠️ failed ·
 🔍 needs_review
+
+**Approval group ke buttons:**
+- Pending post: **✅ Approve** · **❌ Reject** · **⚡ Approve & Post Now** (turant channel mein)
+- Scheduled post: **⚡ Post Now** · **🚫 Cancel**
+
+Bot ke saare messages English mein hain; ye README Hinglish mein hai.
 
 **Post kaise bhejein:** bot ko DM mein kuch bhi bhejo – text (formatting ke saath), photo, video, GIF,
 document, audio, voice, video note, sticker, poll, location, album. Album ek hi post banta hai.

@@ -104,7 +104,8 @@ class PostService:
         if post["status"] == APPROVED and eta is None:
             eta = await self.eta_for(post["_id"])
         text = texts.render_control(post, self.tz, eta=eta, paused=bool(state.get("paused")))
-        markup = texts.approval_keyboard(post["_id"]) if post["status"] == PENDING else None
+        markup = (texts.approval_keyboard(post["_id"]) if post["status"] == PENDING
+                  else texts.scheduled_keyboard(post["_id"]) if post["status"] == APPROVED else None)
         try:
             await self.bot.edit_message_text(chat_id=self.cfg.approval_group_id,
                                              message_id=post["control_message_id"], text=text,
@@ -160,9 +161,9 @@ class PostService:
         async with self._submit_lock:  # duplicate check + insert must not interleave
             dup = await self.db.find_duplicate(chash, now - timedelta(days=self.cfg.dup_window_days))
             if dup:
-                await self.send(chat_id, f"⚠️ Ye content pehle hi <b>Post #{dup['_id']}</b> "
-                                         f"({texts.status_text(dup['status'])}) mein bheja ja chuka hai. "
-                                         "Duplicate allow nahi hai.", reply_parameters=reply)
+                await self.send(chat_id, f"⚠️ This content was already submitted as <b>Post #{dup['_id']}</b> "
+                                         f"({texts.status_text(dup['status'])}). "
+                                         "Duplicates are not allowed.", reply_parameters=reply)
                 return None
             pid = await self.db.next_post_id()
             post = {
@@ -208,15 +209,15 @@ class PostService:
             await self._fail_submission(post, f"approval group copy failed: {e}", reply)
             return None
         await self.db.update_post(pid, {"control_message_id": control.message_id})
-        await self.send(chat_id, f"✅ <b>Post #{pid}</b> submit ho gaya!\nApproval group mein bhej diya hai. "
-                                 "Approve/reject hone pe aapko yahin bataunga.", reply_parameters=reply)
+        await self.send(chat_id, f"✅ <b>Post #{pid}</b> submitted!\nIt has been sent for approval. "
+                                 "I'll let you know here once it is approved or rejected.", reply_parameters=reply)
         return pid
 
     async def _fail_submission(self, post: dict, error: str, reply: ReplyParameters) -> None:
         log.error("post #%s submission failed: %s", post["_id"], error)
         await self.db.transition(post["_id"], [PENDING], FAILED, {"last_error": error}, event="submit_failed")
-        await self.send(post["source_chat_id"], f"❌ Post save nahi ho paya: {h(truncate(error, 300))}\n"
-                                                "Thodi der baad dobara bhejo.", reply_parameters=reply)
+        await self.send(post["source_chat_id"], f"❌ Your post could not be saved: {h(truncate(error, 300))}\n"
+                                                "Please try again in a little while.", reply_parameters=reply)
         await self.alert_owner(f"⚠️ Post #{post['_id']} submission FAILED\n{h(truncate(error, 500))}")
 
     async def handle_edit(self, message: Message) -> None:
@@ -224,8 +225,8 @@ class PostService:
         if post is None:
             return
         await self.send(message.chat_id,
-                        f"✏️ Edit track nahi hota – <b>Post #{post['_id']}</b> pe iska koi asar nahi padega.\n"
-                        f"Change chahiye to /cancel {post['_id']} karke naya post bhejo.",
+                        f"✏️ Edits are not tracked – this change will not affect <b>Post #{post['_id']}</b>.\n"
+                        f"To change it, use /cancel {post['_id']} and send a new post.",
                         reply_parameters=ReplyParameters(message_id=message.message_id,
                                                          allow_sending_without_reply=True))
 
@@ -233,8 +234,8 @@ class PostService:
     async def _why_not(self, post_id: int) -> str:
         post = await self.db.get_post(post_id)
         if post is None:
-            return f"Post #{post_id} nahi mila."
-        return f"Post #{post_id} pehle se {texts.status_text(post['status'])} hai."
+            return f"Post #{post_id} not found."
+        return f"Post #{post_id} is already {texts.status_text(post['status'])}."
 
     async def approve(self, post_id: int, user: Any) -> tuple[bool, str]:
         post = await self.db.transition(
@@ -250,8 +251,8 @@ class PostService:
         eta = await self.eta_for(post_id)
         eta_txt = texts.fmt_eta(eta, self.tz, bool(state.get("paused")))
         await self.refresh_control(post, eta)
-        await self.notify_submitter(post, f"✅ Aapka <b>Post #{post_id}</b> approve ho gaya!\n"
-                                          f"⏰ Channel mein ETA: {eta_txt}")
+        await self.notify_submitter(post, f"✅ Your <b>Post #{post_id}</b> has been approved!\n"
+                                          f"⏰ Expected in the channel: {eta_txt}")
         return True, f"✅ Post #{post_id} approved. ETA: {eta_txt}"
 
     async def reject(self, post_id: int, user: Any, reason: str | None = None) -> tuple[bool, str]:
@@ -266,44 +267,75 @@ class PostService:
             return False, await self._why_not(post_id)
         log.info("post #%s rejected by %s", post_id, user.id)
         await self.refresh_control(post)
-        await self.notify_submitter(post, f"❌ Aapka <b>Post #{post_id}</b> reject ho gaya."
+        await self.notify_submitter(post, f"❌ Your <b>Post #{post_id}</b> was rejected."
                                           + (f"\n💬 Reason: {h(reason)}" if reason else ""))
         return True, f"❌ Post #{post_id} rejected."
 
     async def cancel(self, post_id: int, user: Any) -> tuple[bool, str]:
         post = await self.db.get_post(post_id)
         if post is None:
-            return False, f"Post #{post_id} nahi mila."
+            return False, f"Post #{post_id} not found."
         if not (self.cfg.is_owner(user.id) or post.get("submitter_id") == user.id):
-            return False, "Sirf owner ya post bhejne wala hi cancel kar sakta hai."
+            return False, "Only the owner or the person who submitted the post can cancel it."
         post = await self.db.transition(post_id, [PENDING, APPROVED], CANCELLED,
                                         {"cancelled_by": user.id, "cancelled_at": self.clock()},
                                         event="cancelled", by=user.id)
         if post is None:
-            return False, (await self._why_not(post_id)) + " Ab cancel nahi ho sakta."
+            return False, (await self._why_not(post_id)) + " It can no longer be cancelled."
         log.info("post #%s cancelled by %s", post_id, user.id)
         await self.refresh_control(post)
         if post.get("submitter_id") != user.id:
-            await self.notify_submitter(post, f"🚫 Aapka <b>Post #{post_id}</b> owner ne cancel kar diya.")
-        return True, f"🚫 Post #{post_id} cancel ho gaya. Ye kabhi publish nahi hoga."
+            await self.notify_submitter(post, f"🚫 Your <b>Post #{post_id}</b> was cancelled by the owner.")
+        return True, f"🚫 Post #{post_id} cancelled. It will never be published."
 
     async def retry(self, post_id: int, user: Any) -> tuple[bool, str]:
         if not self.cfg.is_owner(user.id):
-            return False, "Sirf owner /retry kar sakta hai."
+            return False, "Only the owner can use /retry."
         post = await self.db.get_post(post_id)
         if post is None:
-            return False, f"Post #{post_id} nahi mila."
+            return False, f"Post #{post_id} not found."
         if not post.get("decided_by"):
-            return False, (f"Post #{post_id} kabhi approve hi nahi hua tha (submission fail hua). "
-                           "Submitter se dobara bhejne ko bolo.")
+            return False, (f"Post #{post_id} was never approved (its submission failed). "
+                           "Ask the submitter to send it again.")
         post = await self.db.transition(post_id, [FAILED, NEEDS_REVIEW], APPROVED,
                                         {"retries": 0, "next_attempt_at": None}, event="retry", by=user.id)
         if post is None:
-            return False, (await self._why_not(post_id)) + " /retry sirf failed/needs_review pe chalta hai."
+            return False, (await self._why_not(post_id)) + " /retry only works on failed or needs_review posts."
         log.info("post #%s re-queued by owner", post_id)
         eta = await self.eta_for(post_id)
         await self.refresh_control(post, eta)
-        return True, f"🔁 Post #{post_id} wapas queue mein. ETA: {texts.fmt_eta(eta, self.tz)}"
+        return True, f"🔁 Post #{post_id} is back in the queue. ETA: {texts.fmt_eta(eta, self.tz)}"
+
+    async def publish_now(self, post_id: int, user: Any) -> tuple[bool, str]:
+        """Approve (if still pending) and publish immediately, ignoring the gap, backoff and pause.
+
+        Callers check that ``user`` is an approver. Afterwards the next scheduled post waits the normal gap.
+        """
+        now = self.clock()
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return False, f"Post #{post_id} not found."
+        if post["status"] == PENDING:
+            approved = await self.db.transition(
+                post_id, [PENDING], APPROVED,
+                {"decided_at": now, "decided_by": user.id, "decided_by_name": _name(user),
+                 "retries": 0, "next_attempt_at": None},
+                event="approved", by=user.id,
+            )
+            if approved is None:
+                return False, await self._why_not(post_id)
+        claimed = await self.db.transition(post_id, [APPROVED], PUBLISHING,
+                                           {"publishing_started_at": now, "posted_now": True},
+                                           event="publish_now", by=user.id)
+        if claimed is None:
+            return False, (await self._why_not(post_id)) + " Only pending or scheduled posts can be posted now."
+        log.info("post #%s: publish now requested by %s", post_id, user.id)
+        if await self._publish_claimed(claimed) == post_id:
+            return True, f"⚡ Post #{post_id} published now. The next scheduled post waits the normal gap after it."
+        after = await self.db.get_post(post_id) or {}
+        reason = f" ({truncate(after['last_error'], 150)})" if after.get("last_error") else ""
+        return False, f"⚠️ Post #{post_id} could not be published right now – status: " \
+                      f"{texts.status_text(after.get('status', '?'))}{reason}"
 
     # ================================================================== settings
     async def set_paused(self, paused: bool) -> None:
@@ -338,12 +370,13 @@ class PostService:
         try:
             channel_ids = await self._deliver(post)
         except asyncio.CancelledError:
-            await self._needs_review(post, "bot band hua jab ye publish ho raha tha – shayad channel mein aa gaya ho")
+            await self._needs_review(post, "the bot stopped while this post was being published – "
+                                           "it may already be in the channel")
             raise
         except RetryAfter as e:
             await self._flood_wait(post, _seconds(e.retry_after))
         except TimedOut as e:  # may have been delivered: never auto-retry
-            await self._needs_review(post, f"Telegram timeout (post shayad channel mein aa gaya ho): {e}")
+            await self._needs_review(post, f"Telegram timed out (the post may already be in the channel): {e}")
         except CopyIncomplete as e:
             await self._backoff(post, str(e))
         except ContentMissing as e:
@@ -385,13 +418,16 @@ class PostService:
         now = self.clock()
         mn, mx = await self.interval()
         next_at = now + timedelta(minutes=self.rng.uniform(mn, mx))
+        current = (await self.db.get_state()).get("next_publish_at")
+        if current and current > next_at:  # a Post Now never pulls the regular queue earlier
+            next_at = current
         updated = await self.db.transition(post["_id"], [PUBLISHING], PUBLISHED,
                                            {"published_at": now, "channel_message_ids": channel_ids,
                                             "next_attempt_at": None})
         await self.db.set_state(last_published_at=now, next_publish_at=next_at)
         log.info("post #%s published (channel msgs %s); next slot %s", post["_id"], channel_ids, next_at.isoformat())
         await self.refresh_control(updated)
-        await self.notify_submitter(post, f"📢 Aapka <b>Post #{post['_id']}</b> channel mein publish ho gaya!")
+        await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> has been published to the channel!")
 
     async def _flood_wait(self, post: dict, seconds: float) -> None:
         until = self.clock() + timedelta(seconds=seconds + 1)
@@ -407,7 +443,7 @@ class PostService:
     async def _backoff(self, post: dict, error: str) -> None:
         retries = int(post.get("retries") or 0) + 1
         if retries > self.cfg.max_retries:
-            await self._fail(post, f"{error} ({self.cfg.max_retries} retries ke baad bhi fail)",
+            await self._fail(post, f"{error} (still failing after {self.cfg.max_retries} retries)",
                              fields={"retries": retries})
             return
         delay = timedelta(minutes=min(2 ** (retries - 1), MAX_BACKOFF_MIN))
@@ -423,9 +459,9 @@ class PostService:
                                            event="failed")
         await self.refresh_control(updated)
         await self.alert_owner(f"⚠️ <b>Post #{post['_id']} FAILED</b>\n{h(truncate(error, 500))}\n\n"
-                               f"Theek karke /retry {post['_id']} kar sakte ho.")
-        await self.notify_submitter(post, f"⚠️ Aapka <b>Post #{post['_id']}</b> publish nahi ho paya. "
-                                          "Owner ko bata diya gaya hai.")
+                               f"Fix the cause, then use /retry {post['_id']}.")
+        await self.notify_submitter(post, f"⚠️ Your <b>Post #{post['_id']}</b> could not be published. "
+                                          "The owner has been notified.")
 
     async def _needs_review(self, post: dict, error: str) -> None:
         log.error("post #%s NEEDS REVIEW: %s", post["_id"], error)
@@ -434,7 +470,7 @@ class PostService:
         await self.refresh_control(updated)
         await self.alert_owner(
             f"🔍 <b>Post #{post['_id']} needs review</b>\n{h(truncate(error, 500))}\n\n"
-            "Channel check karo: post aa gaya hai to kuch mat karo; nahi aaya to "
+            "Check the channel: if the post is there, do nothing; if it is missing, use "
             f"/retry {post['_id']}")
 
     # ================================================================== startup
@@ -444,30 +480,33 @@ class PostService:
         for post in await self.db.posts_with_status(PUBLISHING):
             upd = await self.db.transition(
                 post["_id"], [PUBLISHING], NEEDS_REVIEW,
-                {"last_error": "bot restart hua jab ye publish ho raha tha – shayad channel mein aa gaya ho"},
+                {"last_error": "the bot restarted while this post was being published – "
+                               "it may already be in the channel"},
                 event="recovered")
             if upd:
                 stuck.append(post["_id"])
                 await self.refresh_control(upd)
         if stuck:
             ids = ", ".join(f"#{i}" for i in stuck)
-            await self.alert_owner(f"🔍 Restart ke time ye post publish ho rahe the: {ids}\n"
-                                   "Inka status <b>needs_review</b> kar diya. Channel check karke /retry &lt;id&gt; "
-                                   "karo agar post nahi aaya.")
+            await self.alert_owner(f"🔍 These posts were being published when the bot restarted: {ids}\n"
+                                   "They are now marked <b>needs_review</b>. "
+                                   "Check the channel and use /retry &lt;id&gt; "
+                                   "for any post that is missing.")
 
         orphans = []
         for post in await self.db.posts_with_status(PENDING):
             if post.get("control_message_id"):
                 continue
             upd = await self.db.transition(post["_id"], [PENDING], FAILED,
-                                           {"last_error": "submission adhoori reh gayi (bot restart)"},
+                                           {"last_error": "submission was interrupted by a bot restart"},
                                            event="recovered")
             if upd:
                 orphans.append(post["_id"])
-                await self.notify_submitter(upd, f"⚠️ Aapka <b>Post #{post['_id']}</b> bot restart ki wajah se "
-                                                 "approval tak nahi pahuncha. Please dobara bhejo.")
+                await self.notify_submitter(upd, f"⚠️ Your <b>Post #{post['_id']}</b> did not reach approval "
+                                                 "because the bot restarted. "
+                                                 "Please send it again.")
         if orphans:
-            await self.alert_owner("⚠️ Adhoore submissions failed mark kiye: "
+            await self.alert_owner("⚠️ Interrupted submissions marked as failed: "
                                    + ", ".join(f"#{i}" for i in orphans))
 
         for post in await self.db.posts_with_status(APPROVED):
@@ -483,7 +522,7 @@ class PostService:
         mn, mx = await self.interval()
         npa = state.get("next_publish_at")
         now = self.clock()
-        slot = "abhi (jaise hi koi post ready ho)" if not npa or npa <= now else \
+        slot = "now (as soon as a post is ready)" if not npa or npa <= now else \
             f"{fmt_dt(npa, self.tz)} (in {fmt_delta(npa - now)})"
         lines = ["📊 <b>Stats</b>"]
         lines += [f"{texts.status_text(s)}: <b>{counts.get(s, 0)}</b>" for s in STATUSES]
@@ -492,7 +531,7 @@ class PostService:
             f"⏱ Interval: {mn:g}–{mx:g} min",
             f"⏭ Next publish slot: {slot}",
             f"📢 Last published: {fmt_dt(state.get('last_published_at'), self.tz)}",
-            f"⏸ Paused: {'HAAN' if state.get('paused') else 'nahi'}",
+            f"⏸ Paused: {'YES' if state.get('paused') else 'no'}",
         ]
         return "\n".join(lines)
 
@@ -500,7 +539,7 @@ class PostService:
         sched = await self.schedule()
         state = await self.db.get_state()
         if not sched:
-            return "🗓 Queue khaali hai – koi scheduled post nahi."
+            return "🗓 The queue is empty – no scheduled posts."
         head = f"🗓 <b>Queue ({len(sched)})</b>" + (" – ⏸ PAUSED" if state.get("paused") else "")
         lines = [head]
         for i, (post, eta) in enumerate(sched, 1):
@@ -513,10 +552,10 @@ class PostService:
         which = which.lower()
         status = texts.LIST_ALIASES.get(which, which)
         if status != "all" and status not in STATUSES:
-            return "Status galat hai. Use: pending|scheduled|published|rejected|cancelled|failed|needs_review|all"
+            return "Unknown status. Use: pending|scheduled|published|rejected|cancelled|failed|needs_review|all"
         posts = await self.db.list_posts(None if status == "all" else [status], limit)
         if not posts:
-            return f"Koi post nahi mila ({h(which)})."
+            return f"No posts found ({h(which)})."
         lines = [f"📋 <b>{h(which)}</b> – latest {len(posts)}"]
         lines += [texts.render_list_line(p, self.tz) for p in posts]
         return _fit(lines)
@@ -541,7 +580,7 @@ class PostService:
         return bool(sent)
 
     async def notify_restart(self) -> None:
-        await self.alert_owner(f"🔄 Bot restart hua (profile: {self.cfg.runtime_profile}).", quiet=True)
+        await self.alert_owner(f"🔄 Bot restarted (profile: {self.cfg.runtime_profile}).", quiet=True)
 
 
 def _fit(lines: list[str], limit: int = TG_LIMIT - 96) -> str:
@@ -550,7 +589,7 @@ def _fit(lines: list[str], limit: int = TG_LIMIT - 96) -> str:
     size = 0
     for i, line in enumerate(lines):
         if size + len(line) + 1 > limit:
-            out.append(f"… aur {len(lines) - i} (limit). /list ya /post use karo.")
+            out.append(f"… and {len(lines) - i} more (message limit). Use /list or /post.")
             break
         out.append(line)
         size += len(line) + 1

@@ -80,7 +80,8 @@ def register(app: Application, cfg: Config, svc: PostService, albums: AlbumBuffe
                     return
                 seen_unauthorized_groups.add(msg.media_group_id)
             if access.can_approve(user.id):
-                await msg.reply_text("ℹ️ Aap approver ho, post bhejne ka access nahi hai. Owner se maango.")
+                await msg.reply_text("ℹ️ You are an approver but don't have access to submit posts. "
+                                     "Ask the owner for it.")
                 return
             await requests.request(user)
             await msg.reply_text(texts.unauthorized_text(user.id), parse_mode=ParseMode.HTML)

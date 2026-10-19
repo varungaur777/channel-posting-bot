@@ -21,9 +21,9 @@ log = logging.getLogger(__name__)
 
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 DENIED = {
-    "staff": "⛔ Ye command sirf authorized admins/approvers ke liye hai.",
-    "approver": "⛔ Sirf approvers approve/reject kar sakte hain.",
-    "owner": "⛔ Ye command sirf owner ke liye hai.",
+    "staff": "⛔ This command is only for authorized submitters and approvers.",
+    "approver": "⛔ Only approvers can do this.",
+    "owner": "⛔ This command is only for the owner.",
 }
 MAX_LIST = 50
 
@@ -134,12 +134,12 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
             return
         text = await svc.details_text(pid)
         if text is None:
-            await reply(update, f"Post #{pid} nahi mila.")
+            await reply(update, f"Post #{pid} not found.")
             return
         await reply(update, text)
         if update.effective_chat.type == ChatType.PRIVATE and not await svc.send_preview(
                 pid, update.effective_chat.id):
-            await reply(update, "ℹ️ Storage channel se preview nahi mil paya.")
+            await reply(update, "ℹ️ Could not load a preview from the storage channel.")
 
     @command("approve", "approver")
     async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -158,6 +158,15 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
             await reply(update, "Use: /reject &lt;id&gt; [reason]")
             return
         _, text = await svc.reject(pid, update.effective_user, " ".join(args[1:]))
+        await reply(update, text)
+
+    @command("postnow", "approver")
+    async def postnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        if pid is None:
+            await reply(update, "Use: /postnow &lt;id&gt; – approve (if needed) and publish immediately")
+            return
+        _, text = await svc.publish_now(pid, update.effective_user)
         await reply(update, text)
 
     @command("cancel", "staff")
@@ -181,12 +190,12 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
     @command("pause", "owner")
     async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await svc.set_paused(True)
-        await reply(update, "⏸ Publishing PAUSE ho gaya. Queue safe hai. /resume se chalu karo.")
+        await reply(update, "⏸ Publishing paused. The queue is kept – use /resume to continue.")
 
     @command("resume", "owner")
     async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await svc.set_paused(False)
-        await reply(update, "▶️ Publishing phir se chalu.")
+        await reply(update, "▶️ Publishing resumed.")
 
     @command("setinterval", "owner")
     async def setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -197,25 +206,25 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
             await reply(update, "Use: /setinterval &lt;min&gt; &lt;max&gt;  (minutes, e.g. /setinterval 10 15)")
             return
         if not (0 < mn <= mx <= 1440):
-            await reply(update, "Galat values: 0 &lt; min ≤ max ≤ 1440 hona chahiye.")
+            await reply(update, "Invalid values: need 0 &lt; min ≤ max ≤ 1440.")
             return
         await svc.set_interval(mn, mx)
-        await reply(update, f"⏱ Interval ab {mn:g}–{mx:g} min. Agle publish ke baad se lagu hoga.")
+        await reply(update, f"⏱ Interval set to {mn:g}–{mx:g} min. It applies from the next publish onwards.")
 
     @command("adduser", "owner")
     async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid, role = _target(update, context.args or [], "post")
         if uid is None or role is None:
             await reply(update, "Use: /adduser &lt;user_id&gt; [post|approve|both]\n"
-                                "(ya kisi ke message pe reply karke: /adduser approve)\n"
-                                "User ID ke liye us user se bot ko /id bhejwao.")
+                                "(or reply to someone's message with: /adduser approve)\n"
+                                "To find a user ID, ask the user to send /id to the bot.")
             return
         roles = ROLES[role]
         new = await access.grant(uid, roles)
         if not new:
-            await reply(update, f"ℹ️ <code>{uid}</code> ke paas ye access pehle se hai.")
+            await reply(update, f"ℹ️ <code>{uid}</code> already has this access.")
             return
-        await reply(update, f"✅ <code>{uid}</code> ko access mila: {', '.join(new)}")
+        await reply(update, f"✅ Granted access to <code>{uid}</code>: {', '.join(new)}")
         await svc.send(uid, granted_text(new))
 
     @command("removeuser", "owner")
@@ -227,11 +236,12 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         removed, from_env = await access.revoke(uid, ROLES[role])
         lines = []
         if removed:
-            lines.append(f"🗑 <code>{uid}</code> se access hata diya: {', '.join(removed)}")
+            lines.append(f"🗑 Removed access from <code>{uid}</code>: {', '.join(removed)}")
         if from_env:
-            lines.append(f"⚠️ {', '.join(from_env)} access env/GitHub secret (SUBMITTER_IDS / APPROVER_IDS / "
-                         "OWNER_ID) se aata hai – wahan se hatao, phir bot restart.")
-        await reply(update, "\n".join(lines) or f"ℹ️ <code>{uid}</code> ke paas bot se diya hua koi access nahi tha.")
+            lines.append(f"⚠️ {', '.join(from_env)} access comes from the env / GitHub secret "
+                         "(SUBMITTER_IDS / APPROVER_IDS / "
+                         "OWNER_ID) – remove it there, then restart the bot.")
+        await reply(update, "\n".join(lines) or f"ℹ️ <code>{uid}</code> had no access granted through the bot.")
 
     @command("users", "owner")
     async def users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -242,11 +252,11 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
 
         await reply(update, "👥 <b>Access list</b>\n"
                             f"👑 Owner: <code>{cfg.owner_id}</code>\n\n"
-                            f"📤 Post (bot se diye): {ids(s['added_submitters'])}\n"
-                            f"👮 Approve (bot se diye): {ids(s['added_approvers'])}\n\n"
-                            f"📤 Post (env/secret): {ids(s['env_submitters'])}\n"
-                            f"👮 Approve (env/secret): {ids(s['env_approvers'])}\n\n"
-                            "Hatane ke liye: /removeuser &lt;user_id&gt;")
+                            f"📤 Can post (added via bot): {ids(s['added_submitters'])}\n"
+                            f"👮 Can approve (added via bot): {ids(s['added_approvers'])}\n\n"
+                            f"📤 Can post (env/secret): {ids(s['env_submitters'])}\n"
+                            f"👮 Can approve (env/secret): {ids(s['env_approvers'])}\n\n"
+                            "To remove someone: /removeuser &lt;user_id&gt;")
 
     # /id posted inside a channel: DM the owner instead of answering in the channel, then tidy up
     async def channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -266,8 +276,8 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
     async def migrated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
         if msg and msg.migrate_to_chat_id and msg.chat_id == cfg.approval_group_id:
-            await svc.alert_owner("⚠️ Approval group supergroup ban gaya, uski ID badal gayi!\n"
-                                  f"Naya APPROVAL_GROUP_ID: <code>{msg.migrate_to_chat_id}</code>\n"
-                                  "Secret/.env update karke bot restart karo.")
+            await svc.alert_owner("⚠️ The approval group was upgraded to a supergroup, so its ID changed!\n"
+                                  f"New APPROVAL_GROUP_ID: <code>{msg.migrate_to_chat_id}</code>\n"
+                                  "Update the secret / .env and restart the bot.")
 
     app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, migrated))

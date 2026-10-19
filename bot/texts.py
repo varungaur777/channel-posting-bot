@@ -1,4 +1,4 @@
-"""User-facing texts (simple Hinglish) and message rendering. All texts use parse_mode=HTML."""
+"""User-facing texts and message rendering. All texts use parse_mode=HTML."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ STATUS_EMOJI = {
     "rejected": "❌", "cancelled": "🚫", "failed": "⚠️", "needs_review": "🔍",
 }
 STATUS_LABEL = {
-    "pending": "Pending (approval ka wait)", "approved": "Scheduled", "publishing": "Publishing...",
+    "pending": "Pending approval", "approved": "Scheduled", "publishing": "Publishing...",
     "published": "Published", "rejected": "Rejected", "cancelled": "Cancelled", "failed": "Failed",
     "needs_review": "Needs review",
 }
@@ -26,9 +26,19 @@ def status_text(status: str) -> str:
 
 
 def approval_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    """Buttons while a post waits for a decision."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Approve", callback_data=f"ap:{post_id}"),
+         InlineKeyboardButton("❌ Reject", callback_data=f"rj:{post_id}")],
+        [InlineKeyboardButton("⚡ Approve & Post Now", callback_data=f"pn:{post_id}")],
+    ])
+
+
+def scheduled_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    """Buttons while an approved post waits in the queue."""
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Approve", callback_data=f"ap:{post_id}"),
-        InlineKeyboardButton("❌ Reject", callback_data=f"rj:{post_id}"),
+        InlineKeyboardButton("⚡ Post Now", callback_data=f"pn:{post_id}"),
+        InlineKeyboardButton("🚫 Cancel", callback_data=f"cx:{post_id}"),
     ]])
 
 
@@ -38,7 +48,7 @@ def fmt_eta(eta: tuple[datetime, datetime] | None, tz: tzinfo, paused: bool = Fa
     early, late = eta
     same_day = early.astimezone(tz).date() == late.astimezone(tz).date()
     text = f"~{fmt_dt(early, tz)} – {fmt_dt(late, tz, with_date=not same_day)}"
-    return text + (" (abhi PAUSED hai)" if paused else "")
+    return text + (" (publishing is PAUSED)" if paused else "")
 
 
 def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | None = None,
@@ -47,7 +57,7 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
     st = post["status"]
     lines = [
         f"📝 <b>Post #{post['_id']}</b>",
-        f"👤 Submitter: {h(post.get('submitter_name'))} (<code>{post.get('submitter_id')}</code>)",
+        f"👤 Submitted by: {h(post.get('submitter_name'))} (<code>{post.get('submitter_id')}</code>)",
         f"📦 Type: {h(post.get('content_type'))}",
         f"🕒 Submitted: {fmt_dt(post.get('created_at'), tz)}",
         f"📌 Status: <b>{status_text(st)}</b>",
@@ -61,16 +71,17 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
     if st == "approved":
         lines.append(f"⏰ ETA: {fmt_eta(eta, tz, paused)}")
         if post.get("retries"):
-            lines.append(f"🔁 Retry {post['retries']} · next try {fmt_dt(post.get('next_attempt_at'), tz)}")
+            lines.append(f"🔁 Retry {post['retries']} · next attempt {fmt_dt(post.get('next_attempt_at'), tz)}")
     if st == "published":
-        lines.append(f"📢 Published: {fmt_dt(post.get('published_at'), tz)}")
+        lines.append(f"📢 Published: {fmt_dt(post.get('published_at'), tz)}"
+                     + (" ⚡ (posted immediately)" if post.get("posted_now") else ""))
     if st == "cancelled":
         lines.append(f"🚫 Cancelled by <code>{post.get('cancelled_by')}</code>"
                      f" · {fmt_dt(post.get('cancelled_at'), tz)}")
     if st in ("failed", "needs_review") and post.get("last_error"):
         lines.append(f"⚠️ {h(truncate(post['last_error'], 300))}")
     if st == "needs_review":
-        lines.append("👉 Owner: channel check karo, phir zarurat ho to /retry " + str(post["_id"]))
+        lines.append(f"👉 Owner: check the channel, then use /retry {post['_id']} if the post is missing.")
     return "\n".join(lines)
 
 
@@ -82,9 +93,9 @@ def render_details(post: dict, tz: tzinfo, eta: tuple[datetime, datetime] | None
         lines.append(f"⏭ Next attempt: {fmt_dt(post['next_attempt_at'], tz)}")
     if post.get("last_error") and post["status"] not in ("failed", "needs_review"):
         lines.append(f"🧾 Last error: {h(truncate(post['last_error'], 300))}")
-    lines.append(f"🗄 Storage msgs: <code>{post.get('storage_message_ids') or '-'}</code>")
+    lines.append(f"🗄 Storage messages: <code>{post.get('storage_message_ids') or '-'}</code>")
     if post.get("channel_message_ids"):
-        lines.append(f"📣 Channel msgs: <code>{post['channel_message_ids']}</code>")
+        lines.append(f"📣 Channel messages: <code>{post['channel_message_ids']}</code>")
     preview = truncate(preview_text(post.get("items") or []), 200)
     if preview:
         lines.append(f"🔤 Preview: {h(preview)}")
@@ -101,48 +112,51 @@ def render_list_line(post: dict, tz: tzinfo) -> str:
 def help_text(min_iv: float, max_iv: float) -> str:
     return (
         "🤖 <b>Channel Posting Bot</b>\n\n"
-        "📤 <b>Post kaise bhejein:</b>\n"
-        "Bas mujhe yahan DM mein content bhejo – text, photo, video, GIF, album, document, audio, voice, "
-        "poll, location, kuch bhi. Main use approval group mein bhej dunga.\n\n"
-        f"✅ Approve hone ke baad post queue mein jata hai aur har {min_iv:g}–{max_iv:g} minute ke gap pe "
-        "channel mein publish hota hai. Har step pe aapko message milega.\n\n"
-        "✏️ Bhejne ke baad edit karoge to wo track nahi hoga – /cancel karke dobara bhejo.\n\n"
-        "<b>Commands:</b>\n"
-        "/id – apna user ID aur chat ID\n"
-        "/stats – kitne post kis status mein, interval, next slot\n"
-        "/queue – scheduled posts ETA ke saath\n"
+        "📤 <b>How to submit a post</b>\n"
+        "Just send me the content here in this chat – text, photo, video, GIF, album, document, audio, "
+        "voice, poll, location, anything. I'll send it to the approval group for review.\n\n"
+        f"✅ Once approved, posts join the queue and are published to the channel with a gap of "
+        f"{min_iv:g}–{max_iv:g} minutes between posts. You'll get a message at every step.\n\n"
+        "✏️ Editing a message after sending it has no effect – use /cancel and send it again.\n\n"
+        "<b>Commands</b>\n"
+        "/id – your user ID and this chat's ID\n"
+        "/stats – posts per status, interval, next publish slot\n"
+        "/queue – scheduled posts with their ETA\n"
         "/list &lt;pending|scheduled|published|rejected|cancelled|failed|needs_review|all&gt; [n]\n"
-        "/post &lt;id&gt; – post ki details (DM mein preview bhi)\n"
-        "/approve &lt;id&gt; · /reject &lt;id&gt; [reason] – approvers ke liye\n"
-        "/cancel &lt;id&gt; – apna pending/scheduled post cancel karo\n\n"
-        "<b>Owner only:</b>\n"
+        "/post &lt;id&gt; – post details (plus a preview in private chat)\n"
+        "/cancel &lt;id&gt; – cancel your pending or scheduled post\n\n"
+        "<b>Approvers</b>\n"
+        "/approve &lt;id&gt; · /reject &lt;id&gt; [reason]\n"
+        "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n\n"
+        "<b>Owner only</b>\n"
         "/retry &lt;id&gt; · /pause · /resume · /setinterval &lt;min&gt; &lt;max&gt;\n"
         "/adduser &lt;user_id&gt; [post|approve|both] · /removeuser &lt;user_id&gt; [post|approve|both] · /users"
     )
 
 
 def unauthorized_text(user_id: int) -> str:
-    return (f"🙏 Aap is bot ko use karne ke liye authorized nahi ho.\n"
-            f"Aapka user ID: <code>{user_id}</code>\n"
-            "🙋 Owner ko aapki access request bhej di gayi hai – approve hone pe yahin message aayega.")
+    return (f"🙏 You are not authorized to use this bot yet.\n"
+            f"Your user ID: <code>{user_id}</code>\n"
+            "🙋 Your access request has been sent to the owner – you'll get a message here once it's approved.")
 
 
 BOT_COMMANDS = [
-    ("start", "Bot kaise use karein"),
-    ("help", "Help aur commands"),
-    ("id", "Chat ID aur user ID"),
-    ("stats", "Status counts, interval, next slot"),
-    ("queue", "Scheduled posts ETA ke saath"),
+    ("start", "How to use this bot"),
+    ("help", "Help and commands"),
+    ("id", "Show chat ID and your user ID"),
+    ("stats", "Post counts, interval, next slot"),
+    ("queue", "Scheduled posts with ETA"),
     ("list", "Recent posts: /list <status> [n]"),
     ("post", "Post details: /post <id>"),
     ("approve", "Approve: /approve <id>"),
     ("reject", "Reject: /reject <id> [reason]"),
+    ("postnow", "Publish immediately: /postnow <id>"),
     ("cancel", "Cancel: /cancel <id>"),
     ("retry", "Owner: /retry <id>"),
-    ("pause", "Owner: publishing roko"),
-    ("resume", "Owner: publishing chalu karo"),
+    ("pause", "Owner: pause publishing"),
+    ("resume", "Owner: resume publishing"),
     ("setinterval", "Owner: /setinterval <min> <max>"),
     ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
     ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
-    ("users", "Owner: kis kis ke paas access hai"),
+    ("users", "Owner: who has access"),
 ]

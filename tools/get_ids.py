@@ -36,7 +36,7 @@ async def listen(token: str, seconds: int) -> int:
         me = await bot.get_me()
         await bot.delete_webhook(drop_pending_updates=False)
         print(f"Bot: @{me.username}  (id {me.id})")
-        print(f"Listening for {seconds}s - ab group mein message bhejo / channels mein post karo...\n")
+        print(f"Listening for {seconds}s - send a message in your group / post in your channels now...\n")
         print(f"{'CHAT ID':>16}  {'TYPE':<10}  TITLE")
         offset = None
         deadline = time.monotonic() + seconds
@@ -47,8 +47,8 @@ async def listen(token: str, seconds: int) -> int:
                     offset=offset, timeout=min(20, max(1, int(deadline - time.monotonic()))),
                     allowed_updates=allowed)
             except Conflict:
-                print("\n409 Conflict: bot kahin aur chal raha hai (GitHub Actions / dusra terminal). "
-                      "Pehle use band karo.")
+                print("\n409 Conflict: the bot is running somewhere else (GitHub Actions / another terminal). "
+                      "Stop it first.")
                 return 1
             except TelegramError as e:
                 print(f"(network issue: {e}, retrying)")
@@ -70,12 +70,13 @@ async def listen(token: str, seconds: int) -> int:
                         seen[chat.id] = chat
                         print(_describe(chat), flush=True)
     groups = [c for c in seen.values() if c.type in ("group", "supergroup", "channel")]
-    print("\nDone.", "Groups/channels found:" if groups else "Koi group/channel nahi mila.")
+    print("\nDone.", "Groups/channels found:" if groups else "No groups or channels found.")
     for c in groups:
         hint = "APPROVAL_GROUP_ID" if c.type in ("group", "supergroup") else "STORAGE_CHANNEL_ID / CHANNEL_ID"
         print(f"  {_describe(c)}   -> {hint}")
     if any(c.type == "group" for c in groups):
-        print("\nNote: type 'group' = basic group. Pehle ise supergroup bana lo (ID badal jayegi), phir dobara chalao.")
+        print("\nNote: type 'group' is a basic group. Convert it to a supergroup first "
+              "(its ID will change), then run this again.")
     return 0
 
 
@@ -85,7 +86,7 @@ def main() -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     token = (os.environ.get("BOT_TOKEN") or "").strip()
     if not token:
-        print("BOT_TOKEN missing: .env mein BOT_TOKEN daalo.")
+        print("BOT_TOKEN is missing: put it in .env first.")
         return 2
     seconds = int(sys.argv[1]) if len(sys.argv) > 1 else 180
     return asyncio.run(listen(token, seconds))

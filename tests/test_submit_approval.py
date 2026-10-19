@@ -19,7 +19,7 @@ async def test_submit_text_goes_storage_then_approval(svc, bot, db) -> None:
     assert copies[1]["chat_id"] == APPROVAL and copies[1]["from_chat_id"] == STORAGE
     control = bot.chats[APPROVAL][post["control_message_id"]]
     assert "Post #1" in control["text"] and control["reply_markup"] is not None
-    assert any("submit ho gaya" in t for t in bot.texts_to(ADMIN))
+    assert any("submitted!" in t for t in bot.texts_to(ADMIN))
 
 
 async def test_album_is_one_post(svc, bot, db) -> None:
@@ -70,10 +70,12 @@ async def test_approve_updates_control_and_notifies(svc, bot, db) -> None:
     assert ok and "ETA" in text
     post = await db.get_post(1)
     control = bot.chats[APPROVAL][post["control_message_id"]]
-    assert "Scheduled" in control["text"] and control.get("reply_markup") is None and "ETA" in control["text"]
-    assert any("approve ho gaya" in t and "ETA" in t for t in bot.texts_to(ADMIN))
+    assert "Scheduled" in control["text"] and "ETA" in control["text"]
+    buttons = [b.callback_data for row in control["reply_markup"].inline_keyboard for b in row]
+    assert buttons == ["pn:1", "cx:1"]  # scheduled posts get Post Now + Cancel
+    assert any("has been approved" in t and "Expected in the channel" in t for t in bot.texts_to(ADMIN))
     ok, text = await svc.approve(1, user(APPROVER))
-    assert not ok and "pehle se" in text
+    assert not ok and "already" in text
 
 
 async def test_reject_reason_reaches_submitter(svc, bot, db) -> None:
@@ -105,4 +107,4 @@ async def test_edit_after_submit_gets_reply(svc, bot) -> None:
     msg = text_msg(ADMIN, "v1", bot)
     await svc.submit(user(ADMIN), [msg])
     await svc.handle_edit(msg)
-    assert any("Edit track nahi hota" in t and "/cancel 1" in t for t in bot.texts_to(ADMIN))
+    assert any("Edits are not tracked" in t and "/cancel 1" in t for t in bot.texts_to(ADMIN))

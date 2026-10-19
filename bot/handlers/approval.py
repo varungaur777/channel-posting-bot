@@ -1,4 +1,8 @@
-"""✅ Approve / ❌ Reject buttons on control messages in the approval group."""
+"""Buttons on control messages in the approval group.
+
+Pending post:   ✅ Approve · ❌ Reject · ⚡ Approve & Post Now
+Scheduled post: ⚡ Post Now · 🚫 Cancel
+"""
 
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
             await q.answer()  # buttons from any other chat are ignored
             return
         if not access.can_approve(q.from_user.id):
-            await q.answer("Aapko approve/reject karne ki permission nahi hai.", show_alert=True)
+            await q.answer("You don't have permission to approve or reject posts.", show_alert=True)
             return
         action, _, raw_id = (q.data or "").partition(":")
         try:
@@ -35,9 +39,17 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
             ok, text = await svc.approve(post_id, q.from_user)
         elif action == "rj":
             ok, text = await svc.reject(post_id, q.from_user)
+        elif action == "pn":
+            await q.answer("⚡ Publishing now...")  # answer first: publishing can take a few seconds
+            ok, text = await svc.publish_now(post_id, q.from_user)
+            if not ok:
+                await svc.send(cfg.approval_group_id, text)
+            return
+        elif action == "cx":
+            ok, text = await svc.cancel(post_id, q.from_user)
         else:
             await q.answer()
             return
         await q.answer(text[:190], show_alert=not ok)
 
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(ap|rj):\d+$"))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(ap|rj|pn|cx):\d+$"))
