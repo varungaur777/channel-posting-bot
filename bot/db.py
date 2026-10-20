@@ -27,10 +27,11 @@ log = logging.getLogger(__name__)
 
 PENDING, APPROVED, PUBLISHING, PUBLISHED = "pending", "approved", "publishing", "published"
 REJECTED, CANCELLED, FAILED, NEEDS_REVIEW = "rejected", "cancelled", "failed", "needs_review"
-STATUSES = (PENDING, APPROVED, PUBLISHING, PUBLISHED, REJECTED, CANCELLED, FAILED, NEEDS_REVIEW)
+CHANGES_REQUESTED = "changes_requested"
+STATUSES = (PENDING, APPROVED, PUBLISHING, PUBLISHED, REJECTED, CHANGES_REQUESTED, CANCELLED, FAILED, NEEDS_REVIEW)
 DUP_STATUSES = (PENDING, APPROVED, PUBLISHING, PUBLISHED, NEEDS_REVIEW)
 _DATE_FIELDS = ("created_at", "decided_at", "publishing_started_at", "published_at", "next_attempt_at",
-                "updated_at")
+                "updated_at", "scheduled_for", "reminded_at")
 
 
 def _fix_dates(doc: dict | None) -> dict | None:
@@ -166,9 +167,24 @@ class Database:
 
     async def next_due(self, now: datetime) -> dict | None:
         """First approved post that is not waiting for a retry backoff."""
-        flt = {"status": APPROVED, "$or": [{"next_attempt_at": None}, {"next_attempt_at": {"$lte": now}}]}
+        flt = {"status": APPROVED, "scheduled_for": None,
+               "$or": [{"next_attempt_at": None}, {"next_attempt_at": {"$lte": now}}]}
         docs = await self.posts.find(flt).sort([("decided_at", ASCENDING), ("_id", ASCENDING)]).limit(1).to_list(1)
         return _fix_dates(docs[0]) if docs else None
+
+    async def next_timed(self, now: datetime) -> dict | None:
+        """First approved post whose fixed publish time (/schedule) has come."""
+        flt = {"status": APPROVED, "scheduled_for": {"$lte": now},
+               "$or": [{"next_attempt_at": None}, {"next_attempt_at": {"$lte": now}}]}
+        docs = await self.posts.find(flt).sort([("scheduled_for", ASCENDING), ("_id", ASCENDING)]).limit(1).to_list(1)
+        return _fix_dates(docs[0]) if docs else None
+
+    async def posts_where(self, flt: dict) -> list[dict]:
+        docs = await self.posts.find(flt).sort("_id", ASCENDING).to_list(None)
+        return [_fix_dates(d) for d in docs]
+
+    async def count(self, flt: dict) -> int:
+        return await self.posts.count_documents(flt)
 
     async def count_by_status(self) -> dict[str, int]:
         return {s: await self.posts.count_documents({"status": s}) for s in STATUSES}

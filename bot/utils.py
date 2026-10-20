@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -232,3 +233,46 @@ def setup_logging(level: str, *, token: str = "", log_dir: Path | None = None) -
     # httpx logs every request URL, and the URL contains the token
     for noisy in ("httpx", "httpcore", "apscheduler"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+# ---- caption edits -----------------------------------------------------------------------------
+CAPTIONABLE = {"photo", "video", "animation", "document", "audio", "voice"}
+CAPTION_LIMIT, TEXT_LIMIT = 1024, 4096
+
+
+def apply_caption(items: Sequence[dict], override: str | None, footer: str | None) -> list[dict] | None:
+    """Return a copy of ``items`` with the caption replaced (``override``) and/or ``footer`` appended.
+
+    ``None`` means "nothing to change" (no edit, or the content cannot carry a caption, e.g. a sticker).
+    The footer is dropped if it would push the caption/text over Telegram's limit.
+    """
+    if not override and not footer:
+        return None
+    out = copy.deepcopy(list(items))
+    if len(out) == 1 and out[0]["media_type"] == "text":
+        it = out[0]
+        text = override if override else it.get("text") or ""
+        if override:
+            it["entities"] = None
+        if footer and len(text) + 2 + len(footer) <= TEXT_LIMIT:
+            text = f"{text}\n\n{footer}"
+        if text == it.get("text") and not override:
+            return None
+        it["text"] = text
+        return out
+    capt = [i for i, it in enumerate(out) if it["media_type"] in CAPTIONABLE]
+    if not capt:
+        return None
+    idx = next((i for i in capt if out[i].get("caption")), capt[0])
+    if override:
+        for it in out:
+            it["caption"], it["caption_entities"] = None, None
+        out[idx]["caption"] = override
+    base = out[idx].get("caption") or ""
+    if footer:
+        joined = f"{base}\n\n{footer}" if base else footer
+        if len(joined) <= CAPTION_LIMIT:
+            out[idx]["caption"] = joined
+        elif not override:
+            return None
+    return out

@@ -47,6 +47,8 @@ class Config:
     lease_heartbeat_seconds: float = 30.0
     lease_expiry_seconds: float = 120.0
     max_retries: int = 5
+    pending_reminder_min: float = 60.0
+    daily_report_hour: int = 22
 
     # ---- roles -------------------------------------------------------------------------------
     def is_owner(self, user_id: int | None) -> bool:
@@ -178,4 +180,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         lease_heartbeat_seconds=_float(env, "LEASE_HEARTBEAT_SECONDS", 30),
         lease_expiry_seconds=_float(env, "LEASE_EXPIRY_SECONDS", 120),
         max_retries=_int(env, "MAX_RETRIES", default=5),
+        pending_reminder_min=_float(env, "PENDING_REMINDER_MIN", 60),
+        daily_report_hour=_int(env, "DAILY_REPORT_HOUR", default=22),
     )

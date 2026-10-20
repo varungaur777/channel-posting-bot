@@ -38,6 +38,7 @@ from bot.config import Config
 from bot.db import (
     APPROVED,
     CANCELLED,
+    CHANGES_REQUESTED,
     FAILED,
     NEEDS_REVIEW,
     PENDING,
@@ -47,8 +48,9 @@ from bot.db import (
     STATUSES,
     Database,
 )
+from bot.schedule_utils import in_quiet, parse_when, quiet_window, skip_quiet
 from bot.storage import ContentMissing, CopyIncomplete, copy_batch, copy_exact, is_missing_error, rebuild, rollback
-from bot.utils import content_hash, content_type, extract_items, fmt_delta, fmt_dt, h, truncate, utcnow
+from bot.utils import apply_caption, content_hash, content_type, extract_items, fmt_delta, fmt_dt, h, truncate, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -129,16 +131,24 @@ class PostService:
         queue = await self.db.queue()
         state = await self.db.get_state()
         mn, mx = await self.interval()
+        quiet = quiet_window(state)
         npa = state.get("next_publish_at")
         early = late = max(now, npa) if npa else now
         out: list[tuple[dict, Eta]] = []
-        for k, post in enumerate(queue):
+        k = 0
+        for post in queue:
+            if post.get("scheduled_for"):  # fixed time: not part of the gap sequence
+                out.append((post, (post["scheduled_for"], post["scheduled_for"])))
+                continue
             if k:
                 early += timedelta(minutes=mn)
                 late += timedelta(minutes=mx)
+            k += 1
+            early, late = skip_quiet(early, quiet, self.tz), skip_quiet(late, quiet, self.tz)
             nat = post.get("next_attempt_at")
             e, l_ = (max(early, nat), max(late, nat)) if nat else (early, late)
             out.append((post, (e, l_)))
+        out.sort(key=lambda pe: (pe[1][0], pe[0]["_id"]))
         return out
 
     async def eta_for(self, post_id: int) -> Eta | None:
@@ -179,6 +189,7 @@ class PostService:
                 "cancelled_by": None, "cancelled_at": None,
                 "publishing_started_at": None, "published_at": None, "channel_message_ids": [],
                 "retries": 0, "next_attempt_at": None, "last_error": None,
+                "scheduled_for": None, "caption_override": None, "reminded_at": None,
                 "history": [{"at": now, "event": "submitted", "by": user.id}],
             }
             await self.db.insert_post(post)
@@ -337,10 +348,115 @@ class PostService:
         return False, f"⚠️ Post #{post_id} could not be published right now – status: " \
                       f"{texts.status_text(after.get('status', '?'))}{reason}"
 
+    # ================================================================== editing decisions
+    async def request_changes(self, post_id: int, user: Any, note: str) -> tuple[bool, str]:
+        """Instead of rejecting: tell the submitter what to change. The post is closed; they resend."""
+        note = (note or "").strip()
+        if not note:
+            return False, "Please write what should be changed."
+        post = await self.db.transition(
+            post_id, [PENDING], CHANGES_REQUESTED,
+            {"decided_at": self.clock(), "decided_by": user.id, "decided_by_name": _name(user),
+             "changes_note": note},
+            event="changes_requested", by=user.id,
+        )
+        if post is None:
+            return False, await self._why_not(post_id)
+        log.info("post #%s: changes requested by %s", post_id, user.id)
+        await self.refresh_control(post)
+        await self.notify_submitter(post, f"✏️ <b>Changes requested</b> for your <b>Post #{post_id}</b>:\n"
+                                          f"{h(note)}\n\nPlease make these changes and send the updated post "
+                                          "to me again.")
+        return True, f"✏️ Changes requested for Post #{post_id}. The submitter has been notified."
+
+    async def set_caption(self, post_id: int, user: Any, text: str | None) -> tuple[bool, str]:
+        """Replace the caption (or the text of a text post) used when publishing. ``None`` restores it."""
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return False, f"Post #{post_id} not found."
+        if post["status"] not in (PENDING, APPROVED):
+            return False, await self._why_not(post_id)
+        items = post.get("items") or []
+        if text is not None:
+            text = text.strip()
+            is_text = len(items) == 1 and items[0]["media_type"] == "text"
+            limit = 4096 if is_text else 1024
+            if not text:
+                return False, "The new caption is empty."
+            if len(text) > limit:
+                return False, f"Too long: {len(text)} characters (limit {limit})."
+            if apply_caption(items, text, None) is None:
+                return False, "This type of post cannot have a caption."
+        post = await self.db.transition(
+            post_id, [post["status"]], post["status"],
+            {"caption_override": text, "caption_edited_by_name": _name(user) if text else None},
+            event="caption_edited" if text else "caption_restored", by=user.id,
+        )
+        if post is None:
+            return False, await self._why_not(post_id)
+        await self.refresh_control(post)
+        if text:
+            await self.notify_submitter(post, f"📝 An approver edited the caption of your <b>Post #{post_id}</b>:\n"
+                                              f"{h(truncate(text, 500))}")
+            return True, f"📝 Caption of Post #{post_id} updated. It will be published with the new caption."
+        return True, f"📝 Post #{post_id} will use its original caption again."
+
+    async def schedule_post(self, post_id: int, user: Any, when_text: str) -> tuple[bool, str]:
+        """Publish at a fixed time ('18:30', '25-10 18:30', '+90', '+2h') or 'off' to go back to the queue."""
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return False, f"Post #{post_id} not found."
+        off = when_text.strip().lower() in ("off", "clear", "none", "cancel")
+        when = None if off else parse_when(when_text, self.clock(), self.tz)
+        if not off and when is None:
+            return False, ("Could not read that time. Examples: 18:30 · 25-10 18:30 · +90 (minutes) · +2h · off")
+        fields: dict[str, Any] = {"scheduled_for": when}
+        if post["status"] == PENDING:  # scheduling a pending post approves it
+            fields.update(decided_at=self.clock(), decided_by=user.id, decided_by_name=_name(user),
+                          retries=0, next_attempt_at=None)
+        elif post["status"] != APPROVED:
+            return False, await self._why_not(post_id)
+        updated = await self.db.transition(post_id, [post["status"]], APPROVED, fields,
+                                           event="scheduled_at" if when else "schedule_cleared", by=user.id)
+        if updated is None:
+            return False, await self._why_not(post_id)
+        await self.refresh_control(updated)
+        if when is None:
+            return True, f"🗓 Post #{post_id} is back in the normal queue."
+        msg = f"🕒 Your <b>Post #{post_id}</b> will be published at {fmt_dt(when, self.tz)}."
+        await self.notify_submitter(updated, ("✅ Approved! " if post["status"] == PENDING else "") + msg)
+        return True, f"🕒 Post #{post_id} will be published at {fmt_dt(when, self.tz)}."
+
+    async def move_to_top(self, post_id: int, user: Any) -> tuple[bool, str]:
+        queue = [p for p in await self.db.queue() if not p.get("scheduled_for")]
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return False, f"Post #{post_id} not found."
+        if post["status"] != APPROVED:
+            return False, await self._why_not(post_id) + " Only scheduled posts can be moved."
+        first = min((p["decided_at"] for p in queue if p.get("decided_at")), default=self.clock())
+        updated = await self.db.transition(
+            post_id, [APPROVED], APPROVED,
+            {"decided_at": min(first, post.get("decided_at") or first) - timedelta(seconds=1),
+             "scheduled_for": None, "next_attempt_at": None},
+            event="moved_to_top", by=user.id,
+        )
+        if updated is None:
+            return False, await self._why_not(post_id)
+        eta = await self.eta_for(post_id)
+        await self.refresh_control(updated, eta)
+        return True, f"⬆️ Post #{post_id} is now first in the queue. ETA: {texts.fmt_eta(eta, self.tz)}"
+
     # ================================================================== settings
     async def set_paused(self, paused: bool) -> None:
         await self.db.set_state(paused=paused)
         log.info("publishing %s", "paused" if paused else "resumed")
+
+    async def set_footer(self, text: str | None) -> None:
+        await self.db.set_state(footer=(text or "").strip() or None)
+
+    async def set_quiet_hours(self, start: int | None, end: int | None) -> None:
+        await self.db.set_state(quiet_start=start, quiet_end=end)
 
     async def set_interval(self, mn: float, mx: float) -> None:
         await self.db.set_state(min_interval=mn, max_interval=mx)
@@ -353,14 +469,18 @@ class PostService:
         if state.get("paused"):
             return None
         now = self.clock()
-        npa = state.get("next_publish_at")
-        if npa and now < npa:
-            return None
-        candidate = await self.db.next_due(now)
+        candidate = await self.db.next_timed(now)  # a fixed publish time wins over the gap and quiet hours
+        if candidate is None:
+            npa = state.get("next_publish_at")
+            if npa and now < npa:
+                return None
+            if in_quiet(now, quiet_window(state), self.tz):
+                return None
+            candidate = await self.db.next_due(now)
         if candidate is None:
             return None
         post = await self.db.transition(candidate["_id"], [APPROVED], PUBLISHING,
-                                        {"publishing_started_at": now}, event="publishing")
+                                        {"publishing_started_at": now, "posted_now": False}, event="publishing")
         if post is None:  # cancelled / claimed in the meantime
             return None
         return await self._publish_claimed(post)
@@ -399,6 +519,10 @@ class PostService:
         """Copy from the storage snapshot; rebuild from saved file_ids when the snapshot is gone."""
         storage_ids = post.get("storage_message_ids") or []
         channel = self.cfg.channel_id
+        footer = (await self.db.get_state()).get("footer")
+        edited = apply_caption(post.get("items") or [], post.get("caption_override"), footer)
+        if edited is not None:  # new caption / footer: re-send from the saved file_ids
+            return await rebuild(self.bot, channel, edited)
         if storage_ids:
             try:
                 sent = await copy_batch(self.bot, channel, self.cfg.storage_channel_id, storage_ids)
@@ -532,6 +656,8 @@ class PostService:
             f"⏭ Next publish slot: {slot}",
             f"📢 Last published: {fmt_dt(state.get('last_published_at'), self.tz)}",
             f"⏸ Paused: {'YES' if state.get('paused') else 'no'}",
+            f"🌙 Quiet hours: {_quiet_text(quiet_window(state))}",
+            f"🔖 Footer: {h(truncate(state['footer'], 60)) if state.get('footer') else 'off'}",
         ]
         return "\n".join(lines)
 
@@ -543,8 +669,9 @@ class PostService:
         head = f"🗓 <b>Queue ({len(sched)})</b>" + (" – ⏸ PAUSED" if state.get("paused") else "")
         lines = [head]
         for i, (post, eta) in enumerate(sched, 1):
-            lines.append(f"{i}. <b>#{post['_id']}</b> · {h(post.get('content_type'))} · ETA "
-                         f"{texts.fmt_eta(eta, self.tz)}"
+            when = (f"🕒 at {fmt_dt(post['scheduled_for'], self.tz)}" if post.get("scheduled_for")
+                    else f"ETA {texts.fmt_eta(eta, self.tz)}")
+            lines.append(f"{i}. <b>#{post['_id']}</b> · {h(post.get('content_type'))} · {when}"
                          + (f" · 🔁{post['retries']}" if post.get("retries") else ""))
         return _fit(lines)
 
@@ -552,7 +679,7 @@ class PostService:
         which = which.lower()
         status = texts.LIST_ALIASES.get(which, which)
         if status != "all" and status not in STATUSES:
-            return "Unknown status. Use: pending|scheduled|published|rejected|cancelled|failed|needs_review|all"
+            return "Unknown status. Use: pending|scheduled|published|rejected|cancelled|failed|needs_review|changes|all"
         posts = await self.db.list_posts(None if status == "all" else [status], limit)
         if not posts:
             return f"No posts found ({h(which)})."
@@ -579,8 +706,62 @@ class PostService:
             return False
         return bool(sent)
 
+    async def housekeeping(self) -> None:
+        """Called by the scheduler every tick: pending reminders and the daily report."""
+        now = self.clock()
+        if self.cfg.pending_reminder_min > 0:
+            cutoff = now - timedelta(minutes=self.cfg.pending_reminder_min)
+            for post in await self.db.posts_where({"status": PENDING, "reminded_at": None,
+                                                   "created_at": {"$lte": cutoff}}):
+                if not post.get("control_message_id"):
+                    continue
+                await self.db.update_post(post["_id"], {"reminded_at": now})
+                waited = fmt_delta(now - post["created_at"])
+                await self.send(self.cfg.approval_group_id,
+                                f"⏰ <b>Post #{post['_id']}</b> has been waiting for approval for {waited}.",
+                                reply_parameters=ReplyParameters(message_id=post["control_message_id"],
+                                                                 allow_sending_without_reply=True))
+        hour = self.cfg.daily_report_hour
+        if 0 <= hour <= 23:
+            local = now.astimezone(self.tz)
+            today = local.strftime("%Y-%m-%d")
+            state = await self.db.get_state()
+            if local.hour >= hour and state.get("last_report_date") != today:
+                await self.db.set_state(last_report_date=today)
+                await self.alert_owner(await self.report_text(), quiet=True)
+
+    async def report_text(self, hours: int = 24) -> str:
+        now = self.clock()
+        since = now - timedelta(hours=hours)
+        db = self.db
+        submitted = await db.count({"created_at": {"$gte": since}})
+        published = await db.count({"status": PUBLISHED, "published_at": {"$gte": since}})
+        rejected = await db.count({"status": REJECTED, "decided_at": {"$gte": since}})
+        changes = await db.count({"status": CHANGES_REQUESTED, "decided_at": {"$gte": since}})
+        failed = await db.count({"status": {"$in": [FAILED, NEEDS_REVIEW]}, "updated_at": {"$gte": since}})
+        pending = await db.count({"status": PENDING})
+        queued = await db.count({"status": APPROVED})
+        state = await db.get_state()
+        npa = state.get("next_publish_at")
+        return "\n".join([
+            f"📈 <b>Report – last {hours} hours</b> ({fmt_dt(now, self.tz)})",
+            f"📥 Submitted: <b>{submitted}</b>",
+            f"📢 Published: <b>{published}</b>",
+            f"❌ Rejected: <b>{rejected}</b> · ✏️ Changes requested: <b>{changes}</b>",
+            f"⚠️ Failed / needs review: <b>{failed}</b>",
+            "",
+            f"⏳ Waiting for approval now: <b>{pending}</b>",
+            f"🗓 In the queue now: <b>{queued}</b>",
+            f"⏭ Next publish slot: {fmt_dt(npa, self.tz) if npa and npa > now else 'now'}",
+            f"⏸ Paused: {'YES' if state.get('paused') else 'no'}",
+        ])
+
     async def notify_restart(self) -> None:
         await self.alert_owner(f"🔄 Bot restarted (profile: {self.cfg.runtime_profile}).", quiet=True)
+
+
+def _quiet_text(window: tuple[int, int] | None) -> str:
+    return f"{window[0]:02d}:00 – {window[1]:02d}:00 (no regular posts)" if window else "off"
 
 
 def _fit(lines: list[str], limit: int = TG_LIMIT - 96) -> str:

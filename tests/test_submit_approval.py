@@ -72,7 +72,7 @@ async def test_approve_updates_control_and_notifies(svc, bot, db) -> None:
     control = bot.chats[APPROVAL][post["control_message_id"]]
     assert "Scheduled" in control["text"] and "ETA" in control["text"]
     buttons = [b.callback_data for row in control["reply_markup"].inline_keyboard for b in row]
-    assert buttons == ["pn:1", "cx:1"]  # scheduled posts get Post Now + Cancel
+    assert buttons == ["pn:1", "sc:1", "tp:1", "ec:1", "cx:1"]  # scheduled-post buttons
     assert any("has been approved" in t and "Expected in the channel" in t for t in bot.texts_to(ADMIN))
     ok, text = await svc.approve(1, user(APPROVER))
     assert not ok and "already" in text

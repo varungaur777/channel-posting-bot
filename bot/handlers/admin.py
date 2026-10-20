@@ -169,6 +169,89 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         _, text = await svc.publish_now(pid, update.effective_user)
         await reply(update, text)
 
+    def rest(update: Update) -> str:
+        """Text after '/command <id>' with line breaks kept."""
+        parts = (update.effective_message.text or "").split(maxsplit=2)
+        return parts[2] if len(parts) > 2 else ""
+
+    @command("changes", "approver")
+    async def changes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        if pid is None or not rest(update).strip():
+            await reply(update, "Use: /changes &lt;id&gt; &lt;what should be changed&gt;")
+            return
+        _, text = await svc.request_changes(pid, update.effective_user, rest(update))
+        await reply(update, text)
+
+    @command("caption", "approver")
+    async def caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        new = rest(update)
+        if pid is None or not new.strip():
+            await reply(update, "Use: /caption &lt;id&gt; &lt;new caption&gt;  ·  /caption &lt;id&gt; off")
+            return
+        _, text = await svc.set_caption(pid, update.effective_user, None if new.strip().lower() == "off" else new)
+        await reply(update, text)
+
+    @command("schedule", "approver")
+    async def schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        if pid is None or not rest(update).strip():
+            await reply(update, "Use: /schedule &lt;id&gt; &lt;time&gt;\n"
+                                "Examples: 18:30 · 25-10 18:30 · +90 · +2h · off")
+            return
+        _, text = await svc.schedule_post(pid, update.effective_user, rest(update))
+        await reply(update, text)
+
+    @command("top", "approver")
+    async def top(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        if pid is None:
+            await reply(update, "Use: /top &lt;id&gt;")
+            return
+        _, text = await svc.move_to_top(pid, update.effective_user)
+        await reply(update, text)
+
+    @command("report", "staff")
+    async def report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await reply(update, await svc.report_text())
+
+    @command("quiethours", "owner")
+    async def quiethours(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        args = context.args or []
+        if args and args[0].lower() == "off":
+            await svc.set_quiet_hours(None, None)
+            await reply(update, "🌙 Quiet hours turned off.")
+            return
+        try:
+            start, end = int(args[0].split(":")[0]), int(args[1].split(":")[0])
+            if not (0 <= start <= 23 and 0 <= end <= 23) or start == end:
+                raise ValueError
+        except (IndexError, ValueError):
+            await reply(update, "Use: /quiethours &lt;start hour&gt; &lt;end hour&gt;  (e.g. /quiethours 23 7)  ·  "
+                                "/quiethours off")
+            return
+        await svc.set_quiet_hours(start, end)
+        await reply(update, f"🌙 Quiet hours set: {start:02d}:00 – {end:02d}:00 ({cfg.tz_name}). No regular posts in "
+                            "this window; posts with a fixed /schedule time and ⚡ Post Now still go out.")
+
+    @command("setfooter", "owner")
+    async def setfooter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        parts = (update.effective_message.text or "").split(maxsplit=1)
+        text = parts[1].strip() if len(parts) > 1 else ""
+        if not text:
+            await reply(update, "Use: /setfooter &lt;text&gt;  (e.g. /setfooter Join @mychannel)  ·  /setfooter off")
+            return
+        if text.lower() == "off":
+            await svc.set_footer(None)
+            await reply(update, "🔖 Footer turned off.")
+            return
+        if len(text) > 200:
+            await reply(update, "Footer is too long (max 200 characters).")
+            return
+        await svc.set_footer(text)
+        await reply(update, f"🔖 Footer set. It will be added under every caption and text post:\n\n{h(text)}")
+
     @command("cancel", "staff")
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pid = _post_id(context.args or [])

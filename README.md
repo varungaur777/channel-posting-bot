@@ -137,6 +137,13 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 | `/post <id>` | staff | `/post 12` → details, retries, last error; DM mein storage se preview bhi |
 | `/approve <id>` | approvers | `/approve 12` |
 | `/reject <id> [reason]` | approvers | `/reject 12 image blur hai` – reason submitter ko jata hai |
+| `/changes <id> <notes>` | approvers | `/changes 12 date galat hai, 25 Oct karo` – reject ki jagah submitter ko changes bhejo; wo naya post bhejega |
+| `/caption <id> <text>` | approvers | caption (ya text post ka text) badlo; `/caption 12 off` = original wapas |
+| `/schedule <id> <time>` | approvers | `/schedule 12 18:30`, `/schedule 12 25-10 09:00`, `/schedule 12 +90`, `/schedule 12 +2h`, `off`. Fixed time pe jayega (gap aur quiet hours ignore) |
+| `/top <id>` | approvers | scheduled post ko queue mein sabse aage |
+| `/report` | staff | last 24 ghante ki summary (owner ko roz 22:00 baje apne aap) |
+| `/quiethours <start> <end>` | owner | `/quiethours 23 7` – raat 11 se subah 7 tak regular posting band; `off` |
+| `/setfooter <text>` | owner | `/setfooter Join @mychannel` – har caption/text ke neeche; `off` |
 | `/postnow <id>` | approvers | `/postnow 12` – gap skip karke **turant** publish (pending ho to pehle approve). Pause aur backoff bhi ignore hota hai. Agla regular post iske baad normal gap pe jayega |
 | `/cancel <id>` | owner / post ka submitter | sirf pending/scheduled post |
 | `/retry <id>` | owner | failed / needs_review post wapas queue mein |
@@ -150,8 +157,11 @@ Status: ⏳ pending · 🗓 scheduled · 🚀 publishing · ✅ published · ❌
 🔍 needs_review
 
 **Approval group ke buttons:**
-- Pending post: **✅ Approve** · **❌ Reject** · **⚡ Approve & Post Now** (turant channel mein)
-- Scheduled post: **⚡ Post Now** · **🚫 Cancel**
+- Pending post: **✅ Approve** · **❌ Reject** · **✏️ Request Changes** · **📝 Edit Caption** · **⚡ Approve & Post Now**
+- Scheduled post: **⚡ Post Now** · **🕒 Schedule** · **⬆️ Move to Top** · **📝 Edit Caption** · **🚫 Cancel**
+- Request Changes / Edit Caption / Schedule dabane pe bot ek message bhejta hai – **us message pe reply** karke likho
+  (changes, naya caption, ya time jaise `18:30`).
+- Koi post 1 ghante se pending ho to group mein reminder aata hai (`PENDING_REMINDER_MIN`, 0 = off).
 
 Bot ke saare messages English mein hain; ye README Hinglish mein hai.
 

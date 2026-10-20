@@ -11,7 +11,8 @@
 #                 (a cancelled run does NOT start the next one).
 # Secrets:        BOT_TOKEN, OWNER_ID, SUBMITTER_IDS, APPROVER_IDS, APPROVAL_GROUP_ID, STORAGE_CHANNEL_ID,
 #                 CHANNEL_ID, MONGO_URL, MONGO_DB_NAME
-# Variables:      MIN_INTERVAL_MIN, MAX_INTERVAL_MIN, TZ_NAME, NOTIFY_RESTART (all optional)
+# Variables:      MIN_INTERVAL_MIN, MAX_INTERVAL_MIN, TZ_NAME, NOTIFY_RESTART, PENDING_REMINDER_MIN,
+#                 DAILY_REPORT_HOUR (all optional)
 
 name: bot
 
@@ -71,6 +72,8 @@ jobs:
           MAX_INTERVAL_MIN: ${{ vars.MAX_INTERVAL_MIN }}
           TZ_NAME: ${{ vars.TZ_NAME }}
           NOTIFY_RESTART: ${{ vars.NOTIFY_RESTART }}
+          PENDING_REMINDER_MIN: ${{ vars.PENDING_REMINDER_MIN }}
+          DAILY_REPORT_HOUR: ${{ vars.DAILY_REPORT_HOUR }}
         run: |
           if [ -z "$MONGO_URL" ]; then echo "::error::MONGO_URL secret is required on GitHub Actions"; fi
           budget=340          # minutes for this whole job; the bot exits gracefully when it is used up

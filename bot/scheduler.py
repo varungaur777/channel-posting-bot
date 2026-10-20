@@ -31,6 +31,7 @@ class Scheduler:
         while not self._stop.is_set():
             try:
                 await self.service.tick()
+                await self.service.housekeeping()
             except asyncio.CancelledError:
                 raise
             except Exception:

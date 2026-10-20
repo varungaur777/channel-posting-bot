@@ -10,15 +10,17 @@ from bot.utils import fmt_dt, h, preview_text, truncate
 
 STATUS_EMOJI = {
     "pending": "⏳", "approved": "🗓", "publishing": "🚀", "published": "✅",
-    "rejected": "❌", "cancelled": "🚫", "failed": "⚠️", "needs_review": "🔍",
+    "rejected": "❌", "changes_requested": "✏️", "cancelled": "🚫", "failed": "⚠️", "needs_review": "🔍",
 }
 STATUS_LABEL = {
     "pending": "Pending approval", "approved": "Scheduled", "publishing": "Publishing...",
-    "published": "Published", "rejected": "Rejected", "cancelled": "Cancelled", "failed": "Failed",
+    "published": "Published", "rejected": "Rejected",
+    "changes_requested": "Changes requested", "cancelled": "Cancelled", "failed": "Failed",
     "needs_review": "Needs review",
 }
 # /list argument -> stored status
-LIST_ALIASES = {"scheduled": "approved", "approved": "approved", "review": "needs_review"}
+LIST_ALIASES = {"scheduled": "approved", "approved": "approved", "review": "needs_review",
+                "changes": "changes_requested"}
 
 
 def status_text(status: str) -> str:
@@ -30,16 +32,21 @@ def approval_keyboard(post_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Approve", callback_data=f"ap:{post_id}"),
          InlineKeyboardButton("❌ Reject", callback_data=f"rj:{post_id}")],
+        [InlineKeyboardButton("✏️ Request Changes", callback_data=f"rc:{post_id}"),
+         InlineKeyboardButton("📝 Edit Caption", callback_data=f"ec:{post_id}")],
         [InlineKeyboardButton("⚡ Approve & Post Now", callback_data=f"pn:{post_id}")],
     ])
 
 
 def scheduled_keyboard(post_id: int) -> InlineKeyboardMarkup:
     """Buttons while an approved post waits in the queue."""
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("⚡ Post Now", callback_data=f"pn:{post_id}"),
-        InlineKeyboardButton("🚫 Cancel", callback_data=f"cx:{post_id}"),
-    ]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚡ Post Now", callback_data=f"pn:{post_id}"),
+         InlineKeyboardButton("🕒 Schedule", callback_data=f"sc:{post_id}")],
+        [InlineKeyboardButton("⬆️ Move to Top", callback_data=f"tp:{post_id}"),
+         InlineKeyboardButton("📝 Edit Caption", callback_data=f"ec:{post_id}")],
+        [InlineKeyboardButton("🚫 Cancel", callback_data=f"cx:{post_id}")],
+    ])
 
 
 def fmt_eta(eta: tuple[datetime, datetime] | None, tz: tzinfo, paused: bool = False) -> str:
@@ -63,12 +70,19 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
         f"📌 Status: <b>{status_text(st)}</b>",
     ]
     if post.get("decided_by") and st != "pending":
-        verb = "Rejected" if st == "rejected" else "Approved"
+        verb = {"rejected": "Rejected", "changes_requested": "Changes requested"}.get(st, "Approved")
         lines.append(f"👮 {verb} by {h(post.get('decided_by_name'))} (<code>{post.get('decided_by')}</code>)"
                      f" · {fmt_dt(post.get('decided_at'), tz)}")
     if st == "rejected" and post.get("reject_reason"):
         lines.append(f"💬 Reason: {h(post['reject_reason'])}")
-    if st == "approved":
+    if st == "changes_requested" and post.get("changes_note"):
+        lines.append(f"✏️ Requested changes: {h(truncate(post['changes_note'], 500))}")
+    if post.get("caption_override") and st in ("pending", "approved", "publishing", "published"):
+        lines.append(f"📝 New caption by {h(post.get('caption_edited_by_name'))}: "
+                     f"{h(truncate(post['caption_override'], 200))}")
+    if st == "approved" and post.get("scheduled_for"):
+        lines.append(f"🕒 Publishing at: {fmt_dt(post['scheduled_for'], tz)}")
+    elif st == "approved":
         lines.append(f"⏰ ETA: {fmt_eta(eta, tz, paused)}")
         if post.get("retries"):
             lines.append(f"🔁 Retry {post['retries']} · next attempt {fmt_dt(post.get('next_attempt_at'), tz)}")
@@ -122,14 +136,21 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/id – your user ID and this chat's ID\n"
         "/stats – posts per status, interval, next publish slot\n"
         "/queue – scheduled posts with their ETA\n"
-        "/list &lt;pending|scheduled|published|rejected|cancelled|failed|needs_review|all&gt; [n]\n"
+        "/list &lt;pending|scheduled|published|rejected|cancelled|failed|needs_review|changes|all&gt; [n]\n"
         "/post &lt;id&gt; – post details (plus a preview in private chat)\n"
         "/cancel &lt;id&gt; – cancel your pending or scheduled post\n\n"
         "<b>Approvers</b>\n"
         "/approve &lt;id&gt; · /reject &lt;id&gt; [reason]\n"
-        "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n\n"
+        "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n"
+        "/changes &lt;id&gt; &lt;what to change&gt; – send the post back to the submitter with notes\n"
+        "/caption &lt;id&gt; &lt;new caption&gt; – replace the caption (/caption &lt;id&gt; off to undo)\n"
+        "/schedule &lt;id&gt; &lt;18:30 | 25-10 18:30 | +90 | +2h | off&gt; – publish at a fixed time\n"
+        "/top &lt;id&gt; – move a scheduled post to the front of the queue\n\n"
         "<b>Owner only</b>\n"
         "/retry &lt;id&gt; · /pause · /resume · /setinterval &lt;min&gt; &lt;max&gt;\n"
+        "/quiethours &lt;start&gt; &lt;end&gt; | off – e.g. /quiethours 23 7: no regular posts at night\n"
+        "/setfooter &lt;text&gt; | off – added under every caption, e.g. /setfooter Join @mychannel\n"
+        "/report – activity summary of the last 24 hours (also sent to the owner daily)\n"
         "/adduser &lt;user_id&gt; [post|approve|both] · /removeuser &lt;user_id&gt; [post|approve|both] · /users"
     )
 
@@ -151,11 +172,18 @@ BOT_COMMANDS = [
     ("approve", "Approve: /approve <id>"),
     ("reject", "Reject: /reject <id> [reason]"),
     ("postnow", "Publish immediately: /postnow <id>"),
+    ("changes", "Request changes: /changes <id> <notes>"),
+    ("caption", "Replace caption: /caption <id> <text>"),
+    ("schedule", "Fixed time: /schedule <id> 18:30"),
+    ("top", "Move to front: /top <id>"),
+    ("report", "Last 24 hours summary"),
     ("cancel", "Cancel: /cancel <id>"),
     ("retry", "Owner: /retry <id>"),
     ("pause", "Owner: pause publishing"),
     ("resume", "Owner: resume publishing"),
     ("setinterval", "Owner: /setinterval <min> <max>"),
+    ("quiethours", "Owner: /quiethours 23 7 or off"),
+    ("setfooter", "Owner: /setfooter <text> or off"),
     ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
     ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
     ("users", "Owner: who has access"),
