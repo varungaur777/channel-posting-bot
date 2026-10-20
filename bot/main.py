@@ -92,6 +92,7 @@ async def run(cfg: Config) -> int:
         async with app:  # initialize() ... shutdown()
             await app.bot.delete_webhook(drop_pending_updates=False)
             await app.bot.set_my_commands([BotCommand(c, d) for c, d in texts.BOT_COMMANDS])
+            await svc.load_channel_info()
             await svc.recover_on_startup()
             await app.start()
             await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)

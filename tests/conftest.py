@@ -81,7 +81,7 @@ class FakeBot:
         return [c["text"] for c in self.chats[chat_id].values() if isinstance(c, dict) and "text" in c]
 
     async def copy_message(self, chat_id: int, from_chat_id: int, message_id: int, **kw: Any) -> Any:
-        await self._hook("copy_message", dict(chat_id=chat_id, from_chat_id=from_chat_id, message_id=message_id))
+        await self._hook("copy_message", dict(chat_id=chat_id, from_chat_id=from_chat_id, message_id=message_id, **kw))
         src = self.chats[from_chat_id]
         if message_id not in src:
             raise BadRequest("Message to copy not found")
@@ -106,6 +106,14 @@ class FakeBot:
         for m in message_ids:
             self.chats[chat_id].pop(m, None)
         return True
+
+    async def edit_message_caption(self, chat_id: int, message_id: int, **kw: Any) -> Any:
+        await self._hook("edit_message_caption", dict(chat_id=chat_id, message_id=message_id, **kw))
+        return True
+
+    async def get_chat(self, chat_id: int) -> Any:
+        await self._hook("get_chat", dict(chat_id=chat_id))
+        return SimpleNamespace(id=chat_id, title="My Channel", username="mychannel")
 
     async def send_media_group(self, chat_id: int, media: list[Any], **kw: Any) -> Any:
         await self._hook("send_media_group", dict(chat_id=chat_id, media=media))

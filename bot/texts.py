@@ -69,6 +69,8 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
         f"🕒 Submitted: {fmt_dt(post.get('created_at'), tz)}",
         f"📌 Status: <b>{status_text(st)}</b>",
     ]
+    if post.get("auto_approved") and st != "pending":
+        lines.append("👮 Auto-approved (approval is off)")
     if post.get("decided_by") and st != "pending":
         verb = {"rejected": "Rejected", "changes_requested": "Changes requested"}.get(st, "Approved")
         lines.append(f"👮 {verb} by {h(post.get('decided_by_name'))} (<code>{post.get('decided_by')}</code>)"
@@ -138,7 +140,9 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/queue – scheduled posts with their ETA\n"
         "/list &lt;pending|scheduled|published|rejected|cancelled|failed|needs_review|changes|all&gt; [n]\n"
         "/post &lt;id&gt; – post details (plus a preview in private chat)\n"
-        "/cancel &lt;id&gt; – cancel your pending or scheduled post\n\n"
+        "/cancel &lt;id&gt; – cancel your pending or scheduled post\n"
+        "/editpost &lt;id&gt; &lt;new caption&gt; – change the caption of your post, even after it is published "
+        "(/editpost &lt;id&gt; off = original)\n\n"
         "<b>Approvers</b>\n"
         "/approve &lt;id&gt; · /reject &lt;id&gt; [reason]\n"
         "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n"
@@ -151,6 +155,8 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/quiethours &lt;start&gt; &lt;end&gt; | off – e.g. /quiethours 23 7: no regular posts at night\n"
         "/setfooter &lt;text&gt; | off – added under every caption, e.g. /setfooter Join @mychannel\n"
         "/report – activity summary of the last 24 hours (also sent to the owner daily)\n"
+        "/approval on|off – turn the approval step on or off (off = posts go straight to the queue)\n"
+        "/setbutton &lt;text&gt; | &lt;url&gt; – buttons under every post (one per line) · default · off\n"
         "/adduser &lt;user_id&gt; [post|approve|both] · /removeuser &lt;user_id&gt; [post|approve|both] · /users"
     )
 
@@ -178,12 +184,15 @@ BOT_COMMANDS = [
     ("top", "Move to front: /top <id>"),
     ("report", "Last 24 hours summary"),
     ("cancel", "Cancel: /cancel <id>"),
+    ("editpost", "Edit caption, even after publishing"),
     ("retry", "Owner: /retry <id>"),
     ("pause", "Owner: pause publishing"),
     ("resume", "Owner: resume publishing"),
     ("setinterval", "Owner: /setinterval <min> <max>"),
     ("quiethours", "Owner: /quiethours 23 7 or off"),
     ("setfooter", "Owner: /setfooter <text> or off"),
+    ("approval", "Owner: /approval on or off"),
+    ("setbutton", "Owner: buttons under every post"),
     ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
     ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
     ("users", "Owner: who has access"),

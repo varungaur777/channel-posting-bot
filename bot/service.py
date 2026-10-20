@@ -20,7 +20,14 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
-from telegram import LinkPreviewOptions, Message, ReplyParameters
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
+    Message,
+    MessageEntity,
+    ReplyParameters,
+)
 from telegram.constants import ParseMode
 from telegram.error import (
     BadRequest,
@@ -79,6 +86,7 @@ class PostService:
         self.rng = rng or random.Random()
         self.tz = cfg.tz
         self._submit_lock = asyncio.Lock()
+        self.default_buttons: list[dict] = []
 
     # ================================================================== messaging helpers
     async def send(self, chat_id: int, text: str, **kwargs: Any) -> Message | None:
@@ -219,7 +227,22 @@ class PostService:
             await rollback(self.bot, self.cfg.approval_group_id, approval_ids)
             await self._fail_submission(post, f"approval group copy failed: {e}", reply)
             return None
-        await self.db.update_post(pid, {"control_message_id": control.message_id})
+        post = await self.db.update_post(pid, {"control_message_id": control.message_id})
+        if not await self.approval_required():
+            auto = await self.db.transition(
+                pid, [PENDING], APPROVED,
+                {"decided_at": self.clock(), "decided_by": None, "decided_by_name": None, "auto_approved": True,
+                 "retries": 0, "next_attempt_at": None},
+                event="auto_approved",
+            )
+            if auto is not None:
+                eta = await self.eta_for(pid)
+                await self.refresh_control(auto, eta)
+                await self.send(chat_id, f"✅ <b>Post #{pid}</b> submitted and added to the queue "
+                                         "(approval is currently off).\n"
+                                         f"⏰ Expected in the channel: {texts.fmt_eta(eta, self.tz)}",
+                                reply_parameters=reply)
+                return pid
         await self.send(chat_id, f"✅ <b>Post #{pid}</b> submitted!\nIt has been sent for approval. "
                                  "I'll let you know here once it is approved or rejected.", reply_parameters=reply)
         return pid
@@ -369,7 +392,8 @@ class PostService:
                                           "to me again.")
         return True, f"✏️ Changes requested for Post #{post_id}. The submitter has been notified."
 
-    async def set_caption(self, post_id: int, user: Any, text: str | None) -> tuple[bool, str]:
+    async def set_caption(self, post_id: int, user: Any, text: str | None, *, notify: bool = True
+                          ) -> tuple[bool, str]:
         """Replace the caption (or the text of a text post) used when publishing. ``None`` restores it."""
         post = await self.db.get_post(post_id)
         if post is None:
@@ -395,7 +419,7 @@ class PostService:
         if post is None:
             return False, await self._why_not(post_id)
         await self.refresh_control(post)
-        if text:
+        if text and notify and post.get("submitter_id") != user.id:
             await self.notify_submitter(post, f"📝 An approver edited the caption of your <b>Post #{post_id}</b>:\n"
                                               f"{h(truncate(text, 500))}")
             return True, f"📝 Caption of Post #{post_id} updated. It will be published with the new caption."
@@ -447,10 +471,99 @@ class PostService:
         await self.refresh_control(updated, eta)
         return True, f"⬆️ Post #{post_id} is now first in the queue. ETA: {texts.fmt_eta(eta, self.tz)}"
 
+    async def edit_post(self, post_id: int, user: Any, text: str | None, *, moderator: bool) -> tuple[bool, str]:
+        """Change the caption/text of a post - before publishing (used at publish time) or after (edited in the
+        channel). Allowed for moderators (owner/approvers) and for the post's own submitter, no approval needed.
+        ``text=None`` restores the original caption."""
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return False, f"Post #{post_id} not found."
+        if not moderator and post.get("submitter_id") != user.id:
+            return False, "You can only edit your own posts."
+        if post["status"] in (PENDING, APPROVED):
+            return await self.set_caption(post_id, user, text, notify=moderator)
+        if post["status"] != PUBLISHED:
+            return False, (await self._why_not(post_id)) + " Only pending, scheduled or published posts can be edited."
+        items = post.get("items") or []
+        is_text = len(items) == 1 and items[0]["media_type"] == "text"
+        if text is not None:
+            text = text.strip()
+            limit = 4096 if is_text else 1024
+            if not text or len(text) > limit:
+                return False, f"The new caption must be 1–{limit} characters."
+        footer = (await self.db.get_state()).get("footer")
+        if text is None:  # back to the original caption (+ footer)
+            edited = apply_caption(items, None, footer) or [dict(i) for i in items]
+        else:
+            edited = apply_caption(items, text, footer)
+        if edited is None:
+            return False, "This type of post cannot have a caption."
+        ids = post.get("channel_message_ids") or []
+        idx = next((i for i, it in enumerate(edited) if it.get("text") or it.get("caption")), 0) if not is_text else 0
+        if idx >= len(ids):
+            return False, "Could not find this post's message in the channel."
+        markup = await self.post_buttons() if len(ids) == 1 else None
+        try:
+            if is_text:
+                await self.bot.edit_message_text(chat_id=self.cfg.channel_id, message_id=ids[0],
+                                                 text=edited[0]["text"],
+                                                 entities=_ents_or_none(edited[0].get("entities"), self.bot),
+                                                 reply_markup=markup, link_preview_options=None)
+            else:
+                await self.bot.edit_message_caption(chat_id=self.cfg.channel_id, message_id=ids[idx],
+                                                    caption=edited[idx].get("caption") or "",
+                                                    caption_entities=_ents_or_none(
+                                                        edited[idx].get("caption_entities"), self.bot),
+                                                    reply_markup=markup)
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                return False, f"⚠️ Telegram did not accept the edit: {h(e)}"
+        except TelegramError as e:
+            return False, f"⚠️ Could not edit the channel post: {h(e)}"
+        updated = await self.db.transition(
+            post_id, [PUBLISHED], PUBLISHED,
+            {"caption_override": text, "caption_edited_by_name": _name(user) if text else None},
+            event="edited_in_channel", by=user.id,
+        )
+        await self.refresh_control(updated)
+        if moderator and post.get("submitter_id") != user.id:
+            await self.notify_submitter(post, f"📝 The caption of your published <b>Post #{post_id}</b> was edited.")
+        log.info("post #%s edited in the channel by %s", post_id, user.id)
+        return True, f"✏️ Post #{post_id} updated in the channel."
+
     # ================================================================== settings
     async def set_paused(self, paused: bool) -> None:
         await self.db.set_state(paused=paused)
         log.info("publishing %s", "paused" if paused else "resumed")
+
+    async def approval_required(self) -> bool:
+        return (await self.db.get_state()).get("approval_required", True) is not False
+
+    async def set_approval_required(self, required: bool) -> None:
+        await self.db.set_state(approval_required=required)
+        log.info("approval %s", "required" if required else "turned off (auto-approve)")
+
+    async def load_channel_info(self) -> None:
+        """Remember the channel's public link for the default Join button."""
+        try:
+            chat = await self.bot.get_chat(self.cfg.channel_id)
+        except TelegramError as e:
+            log.warning("could not read channel info: %s", e)
+            return
+        if chat.username:
+            self.default_buttons = [{"text": f"📢 Join {chat.title}", "url": f"https://t.me/{chat.username}"}]
+
+    async def post_buttons(self) -> InlineKeyboardMarkup | None:
+        """Buttons under every channel post: the /setbutton list, else the default Join button."""
+        state = await self.db.get_state()
+        rows = state["buttons"] if "buttons" in state and state["buttons"] is not None else self.default_buttons
+        if not rows:
+            return None
+        return InlineKeyboardMarkup([[InlineKeyboardButton(b["text"], url=b["url"])] for b in rows])
+
+    async def set_buttons(self, rows: list[dict] | None) -> None:
+        """``None`` = back to the default Join button, ``[]`` = no buttons."""
+        await self.db.set_state(buttons=rows)
 
     async def set_footer(self, text: str | None) -> None:
         await self.db.set_state(footer=(text or "").strip() or None)
@@ -520,12 +633,13 @@ class PostService:
         storage_ids = post.get("storage_message_ids") or []
         channel = self.cfg.channel_id
         footer = (await self.db.get_state()).get("footer")
+        markup = await self.post_buttons()
         edited = apply_caption(post.get("items") or [], post.get("caption_override"), footer)
         if edited is not None:  # new caption / footer: re-send from the saved file_ids
-            return await rebuild(self.bot, channel, edited)
+            return await rebuild(self.bot, channel, edited, markup)
         if storage_ids:
             try:
-                sent = await copy_batch(self.bot, channel, self.cfg.storage_channel_id, storage_ids)
+                sent = await copy_batch(self.bot, channel, self.cfg.storage_channel_id, storage_ids, markup)
             except BadRequest as e:
                 if not is_missing_error(e):
                     raise
@@ -536,7 +650,7 @@ class PostService:
                 await rollback(self.bot, channel, sent)
                 log.warning("only %d/%d storage messages of #%s copied - rebuilding from file_ids",
                             len(sent), len(storage_ids), post["_id"])
-        return await rebuild(self.bot, channel, post.get("items") or [])
+        return await rebuild(self.bot, channel, post.get("items") or [], markup)
 
     async def _published(self, post: dict, channel_ids: list[int]) -> None:
         now = self.clock()
@@ -551,7 +665,8 @@ class PostService:
         await self.db.set_state(last_published_at=now, next_publish_at=next_at)
         log.info("post #%s published (channel msgs %s); next slot %s", post["_id"], channel_ids, next_at.isoformat())
         await self.refresh_control(updated)
-        await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> has been published to the channel!")
+        await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> has been published to the channel!\n"
+                                          f"✏️ To change its caption: /editpost {post['_id']} &lt;new caption&gt;")
 
     async def _flood_wait(self, post: dict, seconds: float) -> None:
         until = self.clock() + timedelta(seconds=seconds + 1)
@@ -658,6 +773,7 @@ class PostService:
             f"⏸ Paused: {'YES' if state.get('paused') else 'no'}",
             f"🌙 Quiet hours: {_quiet_text(quiet_window(state))}",
             f"🔖 Footer: {h(truncate(state['footer'], 60)) if state.get('footer') else 'off'}",
+            f"✅ Approval: {'required' if state.get('approval_required', True) is not False else 'OFF (auto-approve)'}",
         ]
         return "\n".join(lines)
 
@@ -758,6 +874,10 @@ class PostService:
 
     async def notify_restart(self) -> None:
         await self.alert_owner(f"🔄 Bot restarted (profile: {self.cfg.runtime_profile}).", quiet=True)
+
+
+def _ents_or_none(raw: list[dict] | None, bot: Any) -> list[MessageEntity] | None:
+    return [MessageEntity.de_json(e, bot) for e in raw] if raw else None
 
 
 def _quiet_text(window: tuple[int, int] | None) -> str:

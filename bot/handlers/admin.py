@@ -252,6 +252,63 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         await svc.set_footer(text)
         await reply(update, f"🔖 Footer set. It will be added under every caption and text post:\n\n{h(text)}")
 
+    @command("editpost", "staff")
+    async def editpost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        new = rest(update)
+        if pid is None or not new.strip():
+            await reply(update, "Use: /editpost &lt;id&gt; &lt;new caption&gt;  ·  /editpost &lt;id&gt; off (original)")
+            return
+        uid = update.effective_user.id
+        _, text = await svc.edit_post(pid, update.effective_user, None if new.strip().lower() == "off" else new,
+                                      moderator=access.can_approve(uid))
+        await reply(update, text)
+
+    @command("approval", "owner")
+    async def approval_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        arg = (context.args or [""])[0].lower()
+        if arg not in ("on", "off"):
+            state = "ON (every post needs approval)" if await svc.approval_required() else "OFF (auto-approve)"
+            await reply(update, f"Approval is currently <b>{state}</b>.\nUse: /approval on · /approval off")
+            return
+        await svc.set_approval_required(arg == "on")
+        await reply(update, "✅ Approval turned ON – new posts wait for an approver." if arg == "on" else
+                    "⚡ Approval turned OFF – new posts go straight into the queue (still shown in the approval "
+                    "group, where you can Cancel or Post Now).")
+
+    @command("setbutton", "owner")
+    async def setbutton(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        parts = (update.effective_message.text or "").split(maxsplit=1)
+        raw = parts[1].strip() if len(parts) > 1 else ""
+        usage = ("Use: /setbutton &lt;text&gt; | &lt;url&gt;  (one button per line, max 5)\n"
+                 "e.g. /setbutton 📢 Join Channel | https://t.me/yourchannel\n"
+                 "/setbutton default – the automatic Join button · /setbutton off – no buttons")
+        if not raw:
+            await reply(update, usage)
+            return
+        if raw.lower() in ("off", "none"):
+            await svc.set_buttons([])
+            await reply(update, "🔘 Buttons under posts turned off.")
+            return
+        if raw.lower() == "default":
+            await svc.set_buttons(None)
+            await reply(update, "🔘 Back to the default Join button.")
+            return
+        rows = []
+        for line in raw.splitlines():
+            text, sep, url = line.partition("|")
+            text, url = text.strip(), url.strip()
+            if not sep or not text or not url.startswith(("https://", "http://", "tg://")) or len(text) > 64:
+                await reply(update, f"Could not read: {h(line)}\n\n{usage}")
+                return
+            rows.append({"text": text, "url": url})
+        if len(rows) > 5:
+            await reply(update, "Max 5 buttons.")
+            return
+        await svc.set_buttons(rows)
+        await reply(update, f"🔘 {len(rows)} button(s) will appear under every new post (not under albums – "
+                            "Telegram does not allow buttons on albums).")
+
     @command("cancel", "staff")
     async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pid = _post_id(context.args or [])

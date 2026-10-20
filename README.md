@@ -145,6 +145,9 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 | `/quiethours <start> <end>` | owner | `/quiethours 23 7` – raat 11 se subah 7 tak regular posting band; `off` |
 | `/setfooter <text>` | owner | `/setfooter Join @mychannel` – har caption/text ke neeche; `off` |
 | `/postnow <id>` | approvers | `/postnow 12` – gap skip karke **turant** publish (pending ho to pehle approve). Pause aur backoff bhi ignore hota hai. Agla regular post iske baad normal gap pe jayega |
+| `/editpost <id> <caption>` | submitter (apna post) / approvers (koi bhi) | caption badlo – **publish ke baad bhi**, channel mein seedha edit hota hai, approval nahi chahiye. `/editpost 12 off` = original |
+| `/approval on\|off` | owner | `off` = naye posts bina approval ke seedhe queue mein (group mein phir bhi dikhte hain, Cancel/Post Now kar sakte ho) |
+| `/setbutton <text> \| <url>` | owner | har post ke neeche button(s), ek line = ek button. **Default: "📢 Join <channel>"** (channel ke public link se). `default` / `off` |
 | `/cancel <id>` | owner / post ka submitter | sirf pending/scheduled post |
 | `/retry <id>` | owner | failed / needs_review post wapas queue mein |
 | `/pause`, `/resume` | owner | publishing roko/chalu karo, queue safe rehti hai |
