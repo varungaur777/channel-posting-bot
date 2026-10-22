@@ -10,9 +10,9 @@
 # Stop the bot:   Actions -> bot -> "..." -> Disable workflow, then cancel the running run
 #                 (a cancelled run does NOT start the next one).
 # Secrets:        BOT_TOKEN, OWNER_ID, SUBMITTER_IDS, APPROVER_IDS, APPROVAL_GROUP_ID, STORAGE_CHANNEL_ID,
-#                 CHANNEL_ID, MONGO_URL, MONGO_DB_NAME
+#                 CHANNEL_ID, MONGO_URL, MONGO_DB_NAME, ANTHROPIC_API_KEY (optional: AI caption helper)
 # Variables:      MIN_INTERVAL_MIN, MAX_INTERVAL_MIN, TZ_NAME, NOTIFY_RESTART, PENDING_REMINDER_MIN,
-#                 DAILY_REPORT_HOUR (all optional)
+#                 DAILY_REPORT_HOUR, AI_MODEL (all optional)
 
 name: bot
 
@@ -68,12 +68,14 @@ jobs:
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           MONGO_URL: ${{ secrets.MONGO_URL }}
           MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MIN_INTERVAL_MIN: ${{ vars.MIN_INTERVAL_MIN }}
           MAX_INTERVAL_MIN: ${{ vars.MAX_INTERVAL_MIN }}
           TZ_NAME: ${{ vars.TZ_NAME }}
           NOTIFY_RESTART: ${{ vars.NOTIFY_RESTART }}
           PENDING_REMINDER_MIN: ${{ vars.PENDING_REMINDER_MIN }}
           DAILY_REPORT_HOUR: ${{ vars.DAILY_REPORT_HOUR }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
         run: |
           if [ -z "$MONGO_URL" ]; then echo "::error::MONGO_URL secret is required on GitHub Actions"; fi
           budget=340          # minutes for this whole job; the bot exits gracefully when it is used up

@@ -13,9 +13,11 @@ from telegram import ForceReply, Message, Update
 from telegram.constants import ChatType
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 
+from bot import texts
 from bot.access import Access
 from bot.config import Config
 from bot.service import PostService
+from bot.utils import h
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ class DmEditor:
         self.svc = svc
         self.access = access
         self.open: dict[tuple[int, int], int] = {}  # (chat id, prompt message id) -> post id
+        self.ai_options: dict[tuple[int, int], list[str]] = {}  # (chat id, post id) -> last AI suggestions
 
     async def ask_caption(self, chat_id: int, post_id: int) -> None:
         prompt = await self.svc.send(
@@ -65,8 +68,34 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
             if q is not None:
                 await q.answer()
             return
-        action, _, raw = (q.data or "").partition(":")
+        parts = (q.data or "").split(":")
+        action, raw = parts[0], parts[-1]
         post_id, chat_id, user = int(raw), q.message.chat.id, q.from_user
+        if action == "dmai":
+            await q.answer("🤖 Writing suggestions... (a few seconds)")
+            options, error = await svc.ai_suggest(post_id, user, parts[1], moderator=access.can_approve(user.id))
+            if not options:
+                await svc.send(chat_id, error)
+                return
+            editor.ai_options[(chat_id, post_id)] = options
+            body = "\n\n".join(f"<b>{i + 1}.</b>\n{h(opt)}" for i, opt in enumerate(options))
+            await svc.send(chat_id, f"🤖 <b>AI suggestions for Post #{post_id}</b>\n\n{body}\n\nPick one to use:",
+                           reply_markup=texts.ai_options_keyboard(post_id, len(options)))
+            return
+        if action == "dmu":
+            choice = parts[1]
+            options = editor.ai_options.get((chat_id, post_id))
+            if choice == "x":
+                editor.ai_options.pop((chat_id, post_id), None)
+                await q.answer("Kept your caption.")
+                return
+            if not options or not choice.isdigit() or int(choice) >= len(options):
+                await q.answer("These suggestions expired – ask the AI again.", show_alert=True)
+                return
+            await q.answer("Using this caption...")
+            editor.ai_options.pop((chat_id, post_id), None)
+            await editor.apply(chat_id, user, post_id, options[int(choice)])
+            return
         if action == "dme":
             await q.answer()
             await editor.ask_caption(chat_id, post_id)
@@ -84,5 +113,6 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
         else:
             await q.answer()
 
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^dm[eorx]:\d+$"))
+    app.add_handler(CallbackQueryHandler(
+        on_button, pattern=r"^(dm[eorx]:\d+|dmai:(improve|translate|hashtags):\d+|dmu:(\d|x):\d+)$"))
     return editor

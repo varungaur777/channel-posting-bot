@@ -48,6 +48,8 @@ class Config:
     lease_expiry_seconds: float = 120.0
     max_retries: int = 5
     pending_reminder_min: float = 60.0
+    anthropic_api_key: str = ""
+    ai_model: str = ""
     daily_report_hour: int = 22
 
     # ---- roles -------------------------------------------------------------------------------
@@ -181,5 +183,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         lease_expiry_seconds=_float(env, "LEASE_EXPIRY_SECONDS", 120),
         max_retries=_int(env, "MAX_RETRIES", default=5),
         pending_reminder_min=_float(env, "PENDING_REMINDER_MIN", 60),
+        anthropic_api_key=_get(env, "ANTHROPIC_API_KEY"),
+        ai_model=_get(env, "AI_MODEL"),
         daily_report_hour=_int(env, "DAILY_REPORT_HOUR", default=22),
     )

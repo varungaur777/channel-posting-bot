@@ -42,6 +42,7 @@ from telegram.error import (
 )
 
 from bot import texts
+from bot.ai import AIUnavailable, CaptionAI
 from bot.config import Config
 from bot.db import (
     APPROVED,
@@ -91,7 +92,7 @@ def _name(user: Any) -> str:
 
 class PostService:
     def __init__(self, cfg: Config, db: Database, bot: Any, *, clock: Callable[[], datetime] = utcnow,
-                 rng: random.Random | None = None) -> None:
+                 rng: random.Random | None = None, ai: CaptionAI | None = None) -> None:
         self.cfg = cfg
         self.db = db
         self.bot = bot
@@ -100,6 +101,7 @@ class PostService:
         self.tz = cfg.tz
         self._submit_lock = asyncio.Lock()
         self.default_buttons: list[dict] = []
+        self.ai = ai  # optional AI caption helper; None or disabled = no AI buttons
         self.reply_targets: dict[int, dict] = {}  # user id -> {"post": id} or {"message_id": id} (/replyto)
 
     # ================================================================== messaging helpers
@@ -648,7 +650,36 @@ class PostService:
         buttons to edit the caption right there (before it is approved or published)."""
         ok, _ = await self.send_channel_preview(post_id, chat_id)
         note = "\n\n👆 Above is how it will look in the channel. Want to change the caption first?" if ok else ""
-        await self.send(chat_id, text + note, reply_markup=texts.dm_edit_keyboard(post_id))
+        await self.send(chat_id, text + note,
+                        reply_markup=texts.dm_edit_keyboard(post_id, ai=bool(self.ai and self.ai.enabled)))
+
+    async def ai_suggest(self, post_id: int, user: Any, mode: str, *, moderator: bool) -> tuple[list[str], str]:
+        """AI caption options for a post (empty list + message when not possible)."""
+        if not (self.ai and self.ai.enabled):
+            return [], "The AI helper is off. The owner can turn it on by setting ANTHROPIC_API_KEY."
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return [], f"Post #{post_id} not found."
+        if not moderator and post.get("submitter_id") != user.id:
+            return [], "You can only edit your own posts."
+        if post["status"] not in (PENDING, APPROVED, PUBLISHED):
+            return [], (await self._why_not(post_id)) + " It can't be edited any more."
+        items = post.get("items") or []
+        is_text = len(items) == 1 and items[0]["media_type"] == "text"
+        if post.get("caption_override"):
+            current = post["caption_override"]
+        elif is_text:
+            current = items[0].get("text") or ""
+        else:
+            current = next((it["caption"] for it in items if it.get("caption")), "")
+        if not current.strip():
+            return [], "This post has no caption to work with – write one first with ✏️ Edit caption."
+        try:
+            options = await self.ai.suggest(current, mode, limit=4096 if is_text else 1024)
+        except AIUnavailable as e:
+            return [], f"🤖 {h(e)}"
+        log.info("post #%s: %d AI caption option(s) (%s) for %s", post_id, len(options), mode, user.id)
+        return options, ""
 
     async def leaderboard_text(self, days: int = 30) -> str:
         since = self.clock() - timedelta(days=days)

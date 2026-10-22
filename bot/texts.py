@@ -49,13 +49,25 @@ def scheduled_keyboard(post_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def dm_edit_keyboard(post_id: int) -> InlineKeyboardMarkup:
+def dm_edit_keyboard(post_id: int, *, ai: bool = False) -> InlineKeyboardMarkup:
     """Under the DM preview: the submitter fixes the caption before the post goes out."""
-    return InlineKeyboardMarkup([
+    rows = [
         [InlineKeyboardButton("✏️ Edit caption", callback_data=f"dme:{post_id}"),
          InlineKeyboardButton("🧹 Remove caption", callback_data=f"dmr:{post_id}")],
         [InlineKeyboardButton("↩️ Original caption", callback_data=f"dmo:{post_id}"),
          InlineKeyboardButton("🚫 Cancel post", callback_data=f"dmx:{post_id}")],
+    ]
+    if ai:  # only when ANTHROPIC_API_KEY is set
+        rows.insert(0, [InlineKeyboardButton("✨ Improve (AI)", callback_data=f"dmai:improve:{post_id}"),
+                        InlineKeyboardButton("🌐 Translate", callback_data=f"dmai:translate:{post_id}"),
+                        InlineKeyboardButton("#️⃣ Hashtags", callback_data=f"dmai:hashtags:{post_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def ai_options_keyboard(post_id: int, count: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"✅ Use {i + 1}", callback_data=f"dmu:{i}:{post_id}") for i in range(count)],
+        [InlineKeyboardButton("❌ Keep mine", callback_data=f"dmu:x:{post_id}")],
     ])
 
 

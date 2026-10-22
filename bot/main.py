@@ -22,6 +22,7 @@ from telegram.ext import Application, ContextTypes
 
 from bot import __version__, texts
 from bot.access import Access
+from bot.ai import CaptionAI
 from bot.config import Config, ConfigError, load_config
 from bot.db import Database
 from bot.handlers import register_all
@@ -83,7 +84,8 @@ async def run(cfg: Config) -> int:
         access = Access(cfg, db)
         await access.load()
         app = build_application(cfg)
-        svc = PostService(cfg, db, app.bot)
+        ai = CaptionAI(cfg.anthropic_api_key, cfg.ai_model)
+        svc = PostService(cfg, db, app.bot, ai=ai)
         albums = AlbumBuffer(cfg.album_wait_seconds, lambda msgs: svc.submit(msgs[0].from_user, msgs))
         register_all(app, cfg, svc, albums, access)
         app.add_error_handler(_on_error)
@@ -99,8 +101,8 @@ async def run(cfg: Config) -> int:
             scheduler.start()
             if lease:
                 lease.start_heartbeat(request_stop)
-            log.info("bot @%s v%s is polling (profile=%s, db=%s)", app.bot.username, __version__,
-                     cfg.runtime_profile, db.backend)
+            log.info("bot @%s v%s is polling (profile=%s, db=%s, ai=%s)", app.bot.username, __version__,
+                     cfg.runtime_profile, db.backend, f"on ({ai.model})" if ai.enabled else "off")
             if cfg.notify_restart:
                 await svc.notify_restart()
 

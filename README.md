@@ -168,6 +168,15 @@ Status: ⏳ pending · 🗓 scheduled · 🚀 publishing · ✅ published · ❌
 **✏️ Edit caption** (bot ke message pe reply karke naya caption) · **🧹 Remove caption** · **↩️ Original caption** ·
 **🚫 Cancel post**. Approve/publish se pehle wahin theek kar lo.
 
+**🤖 AI caption helper (abhi OFF – key lagane pe chalu):** DM preview ke neeche **✨ Improve (AI)** ·
+**🌐 Translate** (Hindi↔English) · **#️⃣ Hashtags** buttons aate hain – AI 2-3 caption options deta hai, **✅ Use 1/2/3**
+dabao to wahi lag jata hai. Chalu karne ke liye:
+1. https://console.anthropic.com pe account banao → **API Keys** → *Create Key* → copy (thoda credit add karna padega).
+2. `gh secret set ANTHROPIC_API_KEY -R varungaur777/channel-posting-bot` (key paste karo, Enter) – ya GitHub → Settings →
+   Secrets → *New repository secret* → naam `ANTHROPIC_API_KEY`.
+3. Bot restart: current run cancel karo aur `gh workflow run bot.yml` (ya agle 6-ghante restart ka wait).
+Default model `claude-opus-5-5`; doosra chahiye to Variable `AI_MODEL` (jaise `claude-sonnet-5-5`). Key hatao = feature band.
+
 **Approval group ke buttons:**
 - Pending post: **✅ Approve** · **❌ Reject** · **✏️ Request Changes** · **📝 Edit Caption** · **⚡ Approve & Post Now**
 - Scheduled post: **⚡ Post Now** · **🕒 Schedule** · **⬆️ Move to Top** · **📝 Edit Caption** · **🚫 Cancel**
