@@ -240,42 +240,96 @@ CAPTIONABLE = {"photo", "video", "animation", "document", "audio", "voice"}
 CAPTION_LIMIT, TEXT_LIMIT = 1024, 4096
 
 
-def apply_caption(items: Sequence[dict], override: str | None, footer: str | None) -> list[dict] | None:
-    """Return a copy of ``items`` with the caption replaced (``override``) and/or ``footer`` appended.
+STYLES = ("both", "bold", "quote", "off")
+
+
+def utf16_len(text: str) -> int:
+    """Telegram entity offsets/lengths count UTF-16 code units (emoji = 2, Hindi letters = 1)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def style_entities(text: str, entities: list[dict] | None, style: str | None) -> list[dict] | None:
+    """Make a caption look nicer by ADDING entities (the text itself never changes):
+
+    - bold:  the first line becomes a bold headline (if more text follows and it is <= 200 chars)
+    - quote: everything after the first line goes into a quote block
+    - both:  bold + quote
+
+    Existing formatting is kept. Returns the new entity list, or ``None`` when nothing changes
+    (style off, a one-line caption, or the caption already has a quote / bold headline).
+    """
+    if not style or style == "off" or not text or text[:1].isspace():
+        return None
+    nl = text.find("\n")
+    if nl == -1:
+        return None  # one line: nothing to split into headline + body
+    ents = [dict(e) for e in (entities or [])]
+    head = text[:nl].rstrip()
+    changed = False
+    if style in ("both", "bold") and head and len(head) <= 200:
+        head_len = utf16_len(head)
+        if not any(e["type"] == "bold" and e["offset"] == 0 and e["length"] >= head_len for e in ents):
+            ents.append({"type": "bold", "offset": 0, "length": head_len})
+            changed = True
+    if style in ("both", "quote"):
+        rest = text[nl:]
+        body_start = nl + (len(rest) - len(rest.lstrip()))
+        body_end = len(text.rstrip())
+        has_quote = any(e["type"] in ("blockquote", "expandable_blockquote") for e in ents)
+        if body_end > body_start and not has_quote:
+            ents.append({"type": "blockquote", "offset": utf16_len(text[:body_start]),
+                         "length": utf16_len(text[body_start:body_end])})
+            changed = True
+    if not changed:
+        return None
+    ents.sort(key=lambda e: (e["offset"], -e["length"]))
+    return ents
+
+
+def apply_caption(items: Sequence[dict], override: str | None, footer: str | None,
+                  style: str | None = None) -> list[dict] | None:
+    """Return a copy of ``items`` with the caption replaced (``override``), auto-formatted (``style``)
+    and/or ``footer`` appended.
 
     ``override=""`` removes the caption (media only). Returns ``None`` for "nothing to change" (no edit, or
-    the content cannot carry a caption, e.g. a sticker). The footer is dropped if it would push the
-    caption/text over Telegram's limit.
+    the content cannot carry a caption, e.g. a sticker). The footer stays outside the formatting and is
+    dropped if it would push the caption/text over Telegram's limit.
     """
-    if override is None and not footer:
+    if override is None and not footer and (not style or style == "off"):
         return None
     out = copy.deepcopy(list(items))
     if len(out) == 1 and out[0]["media_type"] == "text":
         it = out[0]
         if override == "":
             return None  # a text post cannot be empty
+        changed = override is not None
         text = override if override is not None else it.get("text") or ""
-        if override is not None:
-            it["entities"] = None
+        ents = None if override is not None else it.get("entities")
+        styled = style_entities(text, ents, style)
+        if styled is not None:
+            ents, changed = styled, True
         if footer and len(text) + 2 + len(footer) <= TEXT_LIMIT:
-            text = f"{text}\n\n{footer}"
-        if text == it.get("text") and override is None:
+            text, changed = f"{text}\n\n{footer}", True
+        if not changed:
             return None
-        it["text"] = text
+        it["text"], it["entities"] = text, ents
         return out
     capt = [i for i, it in enumerate(out) if it["media_type"] in CAPTIONABLE]
     if not capt:
         return None
     idx = next((i for i in capt if out[i].get("caption")), capt[0])
+    changed = override is not None
     if override is not None:
         for it in out:
             it["caption"], it["caption_entities"] = None, None
         out[idx]["caption"] = override or None
     base = out[idx].get("caption") or ""
+    if base:
+        styled = style_entities(base, out[idx].get("caption_entities"), style)
+        if styled is not None:
+            out[idx]["caption_entities"], changed = styled, True
     if footer:
         joined = f"{base}\n\n{footer}" if base else footer
         if len(joined) <= CAPTION_LIMIT:
-            out[idx]["caption"] = joined
-        elif override is None:
-            return None
-    return out
+            out[idx]["caption"], changed = joined, True
+    return out if changed else None

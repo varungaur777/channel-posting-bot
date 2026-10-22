@@ -28,7 +28,8 @@ async def test_album_is_one_post(svc, bot, db) -> None:
     post = await db.get_post(1)
     assert len(post["items"]) == 3 and len(post["storage_message_ids"]) == 3
     assert post["items"][0]["caption"] == "cap" and post["items"][1]["file_unique_id"] == "B"
-    assert [n for n, _ in bot.calls if n.startswith("copy_")] == ["copy_messages", "copy_messages"]
+    copies = [(n, c["chat_id"]) for n, c in bot.calls if n.startswith("copy_")]
+    assert copies == [("copy_messages", STORAGE), ("copy_messages", APPROVAL), ("copy_messages", ADMIN)]  # +DM preview
 
 
 async def test_duplicate_blocked_until_rejected(svc, bot, db) -> None:

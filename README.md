@@ -150,6 +150,9 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 | `/approval on\|off` | owner | `off` = naye posts bina approval ke seedhe queue mein (group mein phir bhi dikhte hain, Cancel/Post Now kar sakte ho) |
 | `/setbutton <text> \| <url>` | owner | har post ke neeche button(s), ek line = ek button. **Default: koi button nahi.** `/setbutton join` = "📢 Join <channel>" button, `off` = band |
 | `/clearbuttons [n]` | owner | pehle se published last n (default 50) posts se buttons hatao |
+| `/preview <id>` | staff | DM mein dekho post channel mein **bilkul kaisa dikhega** (formatting, footer, buttons ke saath) |
+| `/leaderboard [days]` | staff | kis admin ne kitne post bheje / publish / reject (default 30 din) |
+| `/format both\|bold\|quote\|off` | owner | caption auto-format: **pehli line bold** (headline) + **baaki quote block** mein. Default `both`. Sirf multi-line captions badalte hain |
 | `/cancel <id>` | owner / post ka submitter | sirf pending/scheduled post |
 | `/retry <id>` | owner | failed / needs_review post wapas queue mein |
 | `/pause`, `/resume` | owner | publishing roko/chalu karo, queue safe rehti hai |
@@ -160,6 +163,10 @@ Commands bot ke DM aur approval group dono mein chalti hain (permission check ke
 
 Status: ⏳ pending · 🗓 scheduled · 🚀 publishing · ✅ published · ❌ rejected · 🚫 cancelled · ⚠️ failed ·
 🔍 needs_review
+
+**Post bhejte hi DM mein preview:** bot dikhata hai post channel mein kaisa lagega, aur neeche buttons:
+**✏️ Edit caption** (bot ke message pe reply karke naya caption) · **🧹 Remove caption** · **↩️ Original caption** ·
+**🚫 Cancel post**. Approve/publish se pehle wahin theek kar lo.
 
 **Approval group ke buttons:**
 - Pending post: **✅ Approve** · **❌ Reject** · **✏️ Request Changes** · **📝 Edit Caption** · **⚡ Approve & Post Now**

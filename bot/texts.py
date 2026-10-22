@@ -49,6 +49,16 @@ def scheduled_keyboard(post_id: int) -> InlineKeyboardMarkup:
     ])
 
 
+def dm_edit_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    """Under the DM preview: the submitter fixes the caption before the post goes out."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ Edit caption", callback_data=f"dme:{post_id}"),
+         InlineKeyboardButton("🧹 Remove caption", callback_data=f"dmr:{post_id}")],
+        [InlineKeyboardButton("↩️ Original caption", callback_data=f"dmo:{post_id}"),
+         InlineKeyboardButton("🚫 Cancel post", callback_data=f"dmx:{post_id}")],
+    ])
+
+
 def fmt_eta(eta: tuple[datetime, datetime] | None, tz: tzinfo, paused: bool = False) -> str:
     if eta is None:
         return "-"
@@ -150,7 +160,9 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/cancel &lt;id&gt; – cancel your pending or scheduled post\n"
         "/editpost &lt;id&gt; &lt;new caption&gt; – change the caption of your post, even after it is published "
         "(/editpost &lt;id&gt; remove = no caption · /editpost &lt;id&gt; off = original)\n"
-        "/replyto &lt;post id or channel link&gt; – your next post is published as a reply to that post\n\n"
+        "/replyto &lt;post id or channel link&gt; – your next post is published as a reply to that post\n"
+        "/preview &lt;id&gt; – see exactly how a post will look in the channel\n"
+        "/leaderboard [days] – who submitted how much\n\n"
         "<b>Approvers</b>\n"
         "/approve &lt;id&gt; · /reject &lt;id&gt; [reason]\n"
         "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n"
@@ -166,6 +178,7 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/approval on|off – turn the approval step on or off (off = posts go straight to the queue)\n"
         "/setbutton &lt;text&gt; | &lt;url&gt; – buttons under every post (one per line) · join · off\n"
         "/clearbuttons [n] – remove buttons from the last n published posts (default 50)\n"
+        "/format both|bold|quote|off – caption auto-format (bold headline + quote)\n"
         "/adduser &lt;user_id&gt; [post|approve|both] · /removeuser &lt;user_id&gt; [post|approve|both] · /users"
     )
 
@@ -195,6 +208,8 @@ BOT_COMMANDS = [
     ("cancel", "Cancel: /cancel <id>"),
     ("editpost", "Edit caption, even after publishing"),
     ("replyto", "Next post replies to: /replyto <id or link>"),
+    ("preview", "How a post will look: /preview <id>"),
+    ("leaderboard", "Who submitted how much"),
     ("retry", "Owner: /retry <id>"),
     ("pause", "Owner: pause publishing"),
     ("resume", "Owner: resume publishing"),
@@ -204,6 +219,7 @@ BOT_COMMANDS = [
     ("approval", "Owner: /approval on or off"),
     ("setbutton", "Owner: buttons under every post"),
     ("clearbuttons", "Owner: remove buttons from channel posts"),
+    ("format", "Owner: caption auto-format"),
     ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
     ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
     ("users", "Owner: who has access"),

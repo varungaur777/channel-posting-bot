@@ -60,6 +60,7 @@ from bot.schedule_utils import in_quiet, parse_when, quiet_window, skip_quiet
 from bot.storage import ContentMissing, CopyIncomplete, copy_batch, copy_exact, is_missing_error, rebuild, rollback
 from bot.utils import (
     CAPTIONABLE,
+    STYLES,
     apply_caption,
     content_hash,
     content_type,
@@ -254,19 +255,17 @@ class PostService:
             if auto is not None:
                 eta = await self.eta_for(pid)
                 await self.refresh_control(auto, eta)
-                await self.send(chat_id, f"✅ <b>Post #{pid}</b> submitted and added to the queue "
-                                         "(approval is currently off).\n"
-                                         f"⏰ Expected in the channel: {texts.fmt_eta(eta, self.tz)}",
-                                reply_parameters=reply)
+                await self.send_dm_preview(pid, chat_id, f"✅ <b>Post #{pid}</b> submitted and added to the queue "
+                                                         "(approval is currently off).\n"
+                                                         f"⏰ Expected in the channel: {texts.fmt_eta(eta, self.tz)}")
                 return pid
         reply_note = ""
         if post.get("reply_to_post"):
             reply_note = f"\n↩️ It will be published as a reply to Post #{post['reply_to_post']}."
         elif post.get("reply_to_message_id"):
             reply_note = f"\n↩️ It will be published as a reply to channel message {post['reply_to_message_id']}."
-        await self.send(chat_id, f"✅ <b>Post #{pid}</b> submitted!\nIt has been sent for approval. "
-                                 f"I'll let you know here once it is approved or rejected.{reply_note}",
-                        reply_parameters=reply)
+        await self.send_dm_preview(pid, chat_id, f"✅ <b>Post #{pid}</b> submitted!\nIt has been sent for approval. "
+                                                 f"I'll let you know here once it is approved or rejected.{reply_note}")
         return pid
 
     async def _fail_submission(self, post: dict, error: str, reply: ReplyParameters) -> None:
@@ -522,11 +521,12 @@ class PostService:
                 return False, "A text post cannot be empty."
             if len(text) > limit:
                 return False, f"The new caption must be at most {limit} characters."
-        footer = (await self.db.get_state()).get("footer")
-        if text is None:  # back to the original caption (+ footer)
-            edited = apply_caption(items, None, footer) or [dict(i) for i in items]
+        state = await self.db.get_state()
+        footer, style = state.get("footer"), format_style(state)
+        if text is None:  # back to the original caption (+ formatting + footer)
+            edited = apply_caption(items, None, footer, style) or [dict(i) for i in items]
         else:
-            edited = apply_caption(items, text, footer)
+            edited = apply_caption(items, text, footer, style)
         if edited is None:
             return False, "This type of post cannot have a caption."
         ids = post.get("channel_message_ids") or []
@@ -624,6 +624,61 @@ class PostService:
         return True, (f"↩️ Post #{post_id} will be a reply to {label}." if label
                       else f"↩️ Post #{post_id} will be a normal post (not a reply).")
 
+    async def send_channel_preview(self, post_id: int, chat_id: int) -> tuple[bool, str]:
+        """Send the post to ``chat_id`` exactly as it would look in the channel (caption edits, formatting,
+        footer, buttons). Nothing is changed and nothing is posted to the channel."""
+        post = await self.db.get_post(post_id)
+        if post is None:
+            return False, f"Post #{post_id} not found."
+        state = await self.db.get_state()
+        items = post.get("items") or []
+        edited = apply_caption(items, post.get("caption_override"), state.get("footer"), format_style(state))
+        markup = await self.post_buttons()
+        try:
+            if edited is None and post.get("storage_message_ids"):
+                await copy_batch(self.bot, chat_id, self.cfg.storage_channel_id, post["storage_message_ids"], markup)
+            else:
+                await rebuild(self.bot, chat_id, edited or items, markup)
+        except (TelegramError, ContentMissing, CopyIncomplete) as e:
+            return False, f"⚠️ Could not build the preview: {h(e)}"
+        return True, f"👀 This is how <b>Post #{post_id}</b> will look in the channel."
+
+    async def send_dm_preview(self, post_id: int, chat_id: int, text: str) -> None:
+        """After submitting / editing in DM: the post as it will look in the channel, then ``text`` with
+        buttons to edit the caption right there (before it is approved or published)."""
+        ok, _ = await self.send_channel_preview(post_id, chat_id)
+        note = "\n\n👆 Above is how it will look in the channel. Want to change the caption first?" if ok else ""
+        await self.send(chat_id, text + note, reply_markup=texts.dm_edit_keyboard(post_id))
+
+    async def leaderboard_text(self, days: int = 30) -> str:
+        since = self.clock() - timedelta(days=days)
+        rows: dict[int, dict] = {}
+        for post in await self.db.posts_where({"created_at": {"$gte": since}}):
+            uid = post.get("submitter_id")
+            r = rows.setdefault(uid, {"name": post.get("submitter_name") or str(uid), "sent": 0, "published": 0,
+                                      "waiting": 0, "rejected": 0, "changes": 0})
+            r["sent"] += 1
+            st = post["status"]
+            if st == PUBLISHED:
+                r["published"] += 1
+            elif st in (PENDING, APPROVED, PUBLISHING):
+                r["waiting"] += 1
+            elif st == REJECTED:
+                r["rejected"] += 1
+            elif st == CHANGES_REQUESTED:
+                r["changes"] += 1
+        if not rows:
+            return f"🏆 No posts in the last {days} days."
+        ranked = sorted(rows.values(), key=lambda r: (-r["published"], -r["sent"], r["name"]))
+        medals = ["🥇", "🥈", "🥉"]
+        lines = [f"🏆 <b>Leaderboard – last {days} days</b>", ""]
+        for i, r in enumerate(ranked):
+            rate = f"{round(100 * r['published'] / r['sent'])}%" if r["sent"] else "-"
+            lines.append(f"{medals[i] if i < 3 else f'{i + 1}.'} <b>{h(r['name'])}</b>")
+            lines.append(f"    📤 {r['sent']} sent · 📢 {r['published']} published ({rate}) · ⏳ {r['waiting']} waiting"
+                         f" · ❌ {r['rejected']} rejected · ✏️ {r['changes']} changes")
+        return _fit(lines)
+
     # ================================================================== settings
     async def set_paused(self, paused: bool) -> None:
         await self.db.set_state(paused=paused)
@@ -688,6 +743,9 @@ class PostService:
             await asyncio.sleep(0.3)
         log.info("cleared buttons from %d channel post(s), %d failed", cleared, failed)
         return cleared, failed
+
+    async def set_format_style(self, style: str) -> None:
+        await self.db.set_state(format_style=style)
 
     async def set_footer(self, text: str | None) -> None:
         await self.db.set_state(footer=(text or "").strip() or None)
@@ -756,11 +814,12 @@ class PostService:
         """Copy from the storage snapshot; rebuild from saved file_ids when the snapshot is gone."""
         storage_ids = post.get("storage_message_ids") or []
         channel = self.cfg.channel_id
-        footer = (await self.db.get_state()).get("footer")
+        state = await self.db.get_state()
+        footer, style = state.get("footer"), format_style(state)
         markup = await self.post_buttons()
         reply_to = await self._reply_message_id(post)
         items = post.get("items") or []
-        edited = apply_caption(items, post.get("caption_override"), footer)
+        edited = apply_caption(items, post.get("caption_override"), footer, style)
         if edited is not None or (reply_to and len(storage_ids) > 1):
             # new caption / footer, or an album that must be a reply (copyMessages cannot reply):
             # re-send from the saved file_ids
@@ -917,6 +976,7 @@ class PostService:
             f"⏸ Paused: {'YES' if state.get('paused') else 'no'}",
             f"🌙 Quiet hours: {_quiet_text(quiet_window(state))}",
             f"🔖 Footer: {h(truncate(state['footer'], 60)) if state.get('footer') else 'off'}",
+            f"✨ Auto-format: {_STYLE_TEXT[format_style(state)]}",
             f"✅ Approval: {'required' if state.get('approval_required', True) is not False else 'OFF (auto-approve)'}",
         ]
         return "\n".join(lines)
@@ -1018,6 +1078,15 @@ class PostService:
 
     async def notify_restart(self) -> None:
         await self.alert_owner(f"🔄 Bot restarted (profile: {self.cfg.runtime_profile}).", quiet=True)
+
+
+_STYLE_TEXT = {"both": "bold headline + quote", "bold": "bold headline", "quote": "quote", "off": "off"}
+
+
+def format_style(state: dict) -> str:
+    """Caption auto-format style; on ('both') unless the owner changed it with /format."""
+    style = state.get("format_style") or "both"
+    return style if style in STYLES else "both"
 
 
 _CHANNEL_LINK = re.compile(r"t\.me/(?:c/\d+|[A-Za-z0-9_]+)/(\d+)")

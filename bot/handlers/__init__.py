@@ -7,7 +7,7 @@ from telegram.ext import Application
 from bot.access import Access
 from bot.config import Config
 from bot.handlers import access as access_handlers
-from bot.handlers import admin, approval, submit
+from bot.handlers import admin, approval, dm, submit
 from bot.handlers.access import AccessRequests
 from bot.handlers.submit import AlbumBuffer
 from bot.service import PostService
@@ -18,4 +18,5 @@ def register_all(app: Application, cfg: Config, svc: PostService, albums: AlbumB
     admin.register(app, cfg, svc, access, requests)
     approval.register(app, cfg, svc, access)
     access_handlers.register(app, cfg, svc, access)
-    submit.register(app, cfg, svc, albums, access, requests)
+    editor = dm.register(app, cfg, svc, access)
+    submit.register(app, cfg, svc, albums, access, requests, editor)

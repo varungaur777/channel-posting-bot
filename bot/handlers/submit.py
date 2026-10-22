@@ -14,6 +14,7 @@ from bot import texts
 from bot.access import Access
 from bot.config import Config
 from bot.handlers.access import AccessRequests
+from bot.handlers.dm import DmEditor
 from bot.service import PostService
 
 log = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class AlbumBuffer:
 
 
 def register(app: Application, cfg: Config, svc: PostService, albums: AlbumBuffer, access: Access,
-             requests: AccessRequests) -> None:
+             requests: AccessRequests, editor: DmEditor) -> None:
     seen_unauthorized_groups: set[str] = set()
 
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -85,6 +86,8 @@ def register(app: Application, cfg: Config, svc: PostService, albums: AlbumBuffe
                 return
             await requests.request(user)
             await msg.reply_text(texts.unauthorized_text(user.id), parse_mode=ParseMode.HTML)
+            return
+        if await editor.try_handle_reply(msg, user):  # answer to "send the new caption", not a new post
             return
         if msg.media_group_id:
             albums.add(msg)

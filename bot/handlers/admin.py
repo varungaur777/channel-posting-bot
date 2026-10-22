@@ -297,6 +297,39 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
             _, text = await svc.arm_reply(user, args[0])
         await reply(update, text)
 
+    @command("preview", "staff")
+    async def preview(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        pid = _post_id(context.args or [])
+        if pid is None:
+            await reply(update, "Use: /preview &lt;id&gt; – see how a post will look in the channel")
+            return
+        _, text = await svc.send_channel_preview(pid, update.effective_chat.id)
+        await reply(update, text)
+
+    @command("leaderboard", "staff")
+    async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            days = max(1, min(int((context.args or ["30"])[0]), 365))
+        except ValueError:
+            days = 30
+        await reply(update, await svc.leaderboard_text(days))
+
+    @command("format", "owner")
+    async def format_(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        arg = (context.args or [""])[0].lower()
+        names = {"both": "bold headline + quote", "bold": "bold headline only", "quote": "quote only", "off": "off"}
+        if arg not in names:
+            await reply(update, "✨ <b>Caption auto-format</b>\n"
+                                "/format both – first line bold, the rest in a quote block (default)\n"
+                                "/format bold – only the first line bold\n"
+                                "/format quote – only the quote block\n"
+                                "/format off – post captions exactly as sent\n\n"
+                                "Only multi-line captions change; your own bold/links stay. "
+                                "Check with /preview &lt;id&gt;.")
+            return
+        await svc.set_format_style(arg)
+        await reply(update, f"✨ Auto-format: <b>{names[arg]}</b>. Applies to posts published from now on.")
+
     @command("approval", "owner")
     async def approval_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         arg = (context.args or [""])[0].lower()
