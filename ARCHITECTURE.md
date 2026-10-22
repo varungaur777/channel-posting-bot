@@ -15,7 +15,7 @@
                                                         ▼
                          approver clicks / /approve ──► `approved` (queue, ETA)  or  `rejected`
                                                         │
-                       scheduler tick (20 s), gap MIN..MAX min
+                       scheduler tick (5 s), gap MIN..MAX min
                                                         ▼
                                      copyMessage(s) storage ──► TARGET channel  ──► `published`
                                      (snapshot missing → rebuild from saved file_ids)
@@ -72,7 +72,7 @@ MongoDB: items[].file_id / caption / entities  ← fallback if msg 501 was delet
 ## Scheduler
 
 ```
-every 20 s:
+every 5 s:
   paused?                        → skip
   now < meta.next_publish_at?    → skip                 (survives restarts: stored in MongoDB)
   first approved post by (decided_at, _id) whose next_attempt_at is empty or past

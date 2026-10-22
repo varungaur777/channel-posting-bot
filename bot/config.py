@@ -43,7 +43,7 @@ class Config:
     log_level: str
     file_logging: bool
     album_wait_seconds: float = 2.5
-    tick_seconds: float = 20.0
+    tick_seconds: float = 5.0
     lease_heartbeat_seconds: float = 30.0
     lease_expiry_seconds: float = 120.0
     max_retries: int = 5
@@ -176,7 +176,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         log_level=_get(env, "LOG_LEVEL", "DEBUG" if profile == "dev" else "INFO").upper(),
         file_logging=_bool(env, "FILE_LOGGING", profile != "github_actions"),
         album_wait_seconds=_float(env, "ALBUM_WAIT_SECONDS", 2.5),
-        tick_seconds=_float(env, "TICK_SECONDS", 20),
+        tick_seconds=_float(env, "TICK_SECONDS", 5),
         lease_heartbeat_seconds=_float(env, "LEASE_HEARTBEAT_SECONDS", 30),
         lease_expiry_seconds=_float(env, "LEASE_EXPIRY_SECONDS", 120),
         max_retries=_int(env, "MAX_RETRIES", default=5),

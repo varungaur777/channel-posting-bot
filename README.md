@@ -24,7 +24,7 @@ Flow aur internals: [ARCHITECTURE.md](ARCHITECTURE.md)
 | Interval | random 10–15 min (`MIN_INTERVAL_MIN` / `MAX_INTERVAL_MIN`, ya `/setinterval`) |
 | Pehla post | turant publish |
 | Album wait | 2.5 s (`ALBUM_WAIT_SECONDS`) |
-| Scheduler tick | 20 s |
+| Scheduler tick | 5 s |
 | Retries | network error pe 5 retry, backoff 1, 2, 4, 8, 16 min (max 30) |
 | Duplicate window | 30 din (`DUP_WINDOW_DAYS`) |
 | Time zone | Asia/Kolkata (DB mein UTC) |

@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 
 class Scheduler:
-    def __init__(self, service: PostService, tick_seconds: float = 20.0) -> None:
+    def __init__(self, service: PostService, tick_seconds: float = 5.0) -> None:
         self.service = service
         self.tick_seconds = tick_seconds
         self._stop = asyncio.Event()
