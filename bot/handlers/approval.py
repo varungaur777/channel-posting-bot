@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 PROMPTS = {
     "rc": ("✏️ <b>Post #{id}</b> – reply to this message with the changes the submitter should make.",
            "What should be changed?"),
-    "ec": ("📝 <b>Post #{id}</b> – reply to this message with the new caption (or new text).",
+    "ec": ("📝 <b>Post #{id}</b> – reply to this message with the new caption (or new text). "
+           "Reply <code>remove</code> for no caption, <code>off</code> for the original.",
            "New caption"),
     "sc": ("🕒 <b>Post #{id}</b> – reply with the publish time: 18:30 · 25-10 18:30 · +90 (minutes) · +2h · off",
            "e.g. 18:30"),
@@ -92,7 +93,9 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
         if action == "rc":
             _, result = await svc.request_changes(post_id, user, text)
         elif action == "ec":
-            _, result = await svc.set_caption(post_id, user, None if text.strip().lower() == "off" else text)
+            word = text.strip().lower()
+            value = None if word == "off" else "" if word in ("remove", "none", "hide") else text
+            _, result = await svc.set_caption(post_id, user, value)
         else:
             _, result = await svc.schedule_post(post_id, user, text)
         await msg.reply_text(result, parse_mode=ParseMode.HTML)

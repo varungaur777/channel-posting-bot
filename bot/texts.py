@@ -77,11 +77,18 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
                      f" · {fmt_dt(post.get('decided_at'), tz)}")
     if st == "rejected" and post.get("reject_reason"):
         lines.append(f"💬 Reason: {h(post['reject_reason'])}")
+    if post.get("reply_to_post"):
+        lines.append(f"↩️ Reply to Post #{post['reply_to_post']}")
+    elif post.get("reply_to_message_id"):
+        lines.append(f"↩️ Reply to channel message {post['reply_to_message_id']}")
     if st == "changes_requested" and post.get("changes_note"):
         lines.append(f"✏️ Requested changes: {h(truncate(post['changes_note'], 500))}")
-    if post.get("caption_override") and st in ("pending", "approved", "publishing", "published"):
-        lines.append(f"📝 New caption by {h(post.get('caption_edited_by_name'))}: "
-                     f"{h(truncate(post['caption_override'], 200))}")
+    if post.get("caption_override") is not None and st in ("pending", "approved", "publishing", "published"):
+        if post["caption_override"] == "":
+            lines.append(f"📝 Caption removed by {h(post.get('caption_edited_by_name'))}")
+        else:
+            lines.append(f"📝 New caption by {h(post.get('caption_edited_by_name'))}: "
+                         f"{h(truncate(post['caption_override'], 200))}")
     if st == "approved" and post.get("scheduled_for"):
         lines.append(f"🕒 Publishing at: {fmt_dt(post['scheduled_for'], tz)}")
     elif st == "approved":
@@ -142,7 +149,8 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/post &lt;id&gt; – post details (plus a preview in private chat)\n"
         "/cancel &lt;id&gt; – cancel your pending or scheduled post\n"
         "/editpost &lt;id&gt; &lt;new caption&gt; – change the caption of your post, even after it is published "
-        "(/editpost &lt;id&gt; off = original)\n\n"
+        "(/editpost &lt;id&gt; remove = no caption · /editpost &lt;id&gt; off = original)\n"
+        "/replyto &lt;post id or channel link&gt; – your next post is published as a reply to that post\n\n"
         "<b>Approvers</b>\n"
         "/approve &lt;id&gt; · /reject &lt;id&gt; [reason]\n"
         "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n"
@@ -156,7 +164,8 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/setfooter &lt;text&gt; | off – added under every caption, e.g. /setfooter Join @mychannel\n"
         "/report – activity summary of the last 24 hours (also sent to the owner daily)\n"
         "/approval on|off – turn the approval step on or off (off = posts go straight to the queue)\n"
-        "/setbutton &lt;text&gt; | &lt;url&gt; – buttons under every post (one per line) · default · off\n"
+        "/setbutton &lt;text&gt; | &lt;url&gt; – buttons under every post (one per line) · join · off\n"
+        "/clearbuttons [n] – remove buttons from the last n published posts (default 50)\n"
         "/adduser &lt;user_id&gt; [post|approve|both] · /removeuser &lt;user_id&gt; [post|approve|both] · /users"
     )
 
@@ -185,6 +194,7 @@ BOT_COMMANDS = [
     ("report", "Last 24 hours summary"),
     ("cancel", "Cancel: /cancel <id>"),
     ("editpost", "Edit caption, even after publishing"),
+    ("replyto", "Next post replies to: /replyto <id or link>"),
     ("retry", "Owner: /retry <id>"),
     ("pause", "Owner: pause publishing"),
     ("resume", "Owner: resume publishing"),
@@ -193,6 +203,7 @@ BOT_COMMANDS = [
     ("setfooter", "Owner: /setfooter <text> or off"),
     ("approval", "Owner: /approval on or off"),
     ("setbutton", "Owner: buttons under every post"),
+    ("clearbuttons", "Owner: remove buttons from channel posts"),
     ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
     ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
     ("users", "Owner: who has access"),

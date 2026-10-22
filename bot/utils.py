@@ -243,20 +243,23 @@ CAPTION_LIMIT, TEXT_LIMIT = 1024, 4096
 def apply_caption(items: Sequence[dict], override: str | None, footer: str | None) -> list[dict] | None:
     """Return a copy of ``items`` with the caption replaced (``override``) and/or ``footer`` appended.
 
-    ``None`` means "nothing to change" (no edit, or the content cannot carry a caption, e.g. a sticker).
-    The footer is dropped if it would push the caption/text over Telegram's limit.
+    ``override=""`` removes the caption (media only). Returns ``None`` for "nothing to change" (no edit, or
+    the content cannot carry a caption, e.g. a sticker). The footer is dropped if it would push the
+    caption/text over Telegram's limit.
     """
-    if not override and not footer:
+    if override is None and not footer:
         return None
     out = copy.deepcopy(list(items))
     if len(out) == 1 and out[0]["media_type"] == "text":
         it = out[0]
-        text = override if override else it.get("text") or ""
-        if override:
+        if override == "":
+            return None  # a text post cannot be empty
+        text = override if override is not None else it.get("text") or ""
+        if override is not None:
             it["entities"] = None
         if footer and len(text) + 2 + len(footer) <= TEXT_LIMIT:
             text = f"{text}\n\n{footer}"
-        if text == it.get("text") and not override:
+        if text == it.get("text") and override is None:
             return None
         it["text"] = text
         return out
@@ -264,15 +267,15 @@ def apply_caption(items: Sequence[dict], override: str | None, footer: str | Non
     if not capt:
         return None
     idx = next((i for i in capt if out[i].get("caption")), capt[0])
-    if override:
+    if override is not None:
         for it in out:
             it["caption"], it["caption_entities"] = None, None
-        out[idx]["caption"] = override
+        out[idx]["caption"] = override or None
     base = out[idx].get("caption") or ""
     if footer:
         joined = f"{base}\n\n{footer}" if base else footer
         if len(joined) <= CAPTION_LIMIT:
             out[idx]["caption"] = joined
-        elif not override:
+        elif override is None:
             return None
     return out

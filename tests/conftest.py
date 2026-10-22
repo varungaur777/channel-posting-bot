@@ -111,12 +111,16 @@ class FakeBot:
         await self._hook("edit_message_caption", dict(chat_id=chat_id, message_id=message_id, **kw))
         return True
 
+    async def edit_message_reply_markup(self, chat_id: int, message_id: int, **kw: Any) -> Any:
+        await self._hook("edit_message_reply_markup", dict(chat_id=chat_id, message_id=message_id, **kw))
+        return True
+
     async def get_chat(self, chat_id: int) -> Any:
         await self._hook("get_chat", dict(chat_id=chat_id))
         return SimpleNamespace(id=chat_id, title="My Channel", username="mychannel")
 
     async def send_media_group(self, chat_id: int, media: list[Any], **kw: Any) -> Any:
-        await self._hook("send_media_group", dict(chat_id=chat_id, media=media))
+        await self._hook("send_media_group", dict(chat_id=chat_id, media=media, **kw))
         return tuple(SimpleNamespace(message_id=self.put(chat_id, {"media": m.media})) for m in media)
 
     def __getattr__(self, name: str) -> Any:

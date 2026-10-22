@@ -19,8 +19,15 @@ def urls(markup) -> list[str]:
 # ---- buttons -------------------------------------------------------------------------------------
 
 
-async def test_default_join_button_under_posts(svc, bot) -> None:
-    await svc.load_channel_info()
+async def test_no_buttons_by_default(svc, bot) -> None:
+    await approved(svc, bot, text_msg(ADMIN, "plain", bot))
+    await svc.tick()
+    call = next(c for n, c in bot.calls if n == "copy_message" and c["chat_id"] == CHANNEL)
+    assert "reply_markup" not in call
+
+
+async def test_join_button_under_posts(svc, bot) -> None:
+    assert await svc.set_buttons(None)  # /setbutton join
     await approved(svc, bot, text_msg(ADMIN, "hello", bot))
     await svc.tick()
     call = next(c for n, c in bot.calls if n == "copy_message" and c["chat_id"] == CHANNEL)
@@ -31,7 +38,7 @@ async def test_default_join_button_under_posts(svc, bot) -> None:
 
 
 async def test_button_settings(svc, bot) -> None:
-    await svc.load_channel_info()
+    assert await svc.post_buttons() is None
     await svc.set_buttons([{"text": "Website", "url": "https://example.com"}, {"text": "Chat", "url": "https://t.me/x"}])
     assert urls(await svc.post_buttons()) == ["https://example.com", "https://t.me/x"]
     await svc.set_buttons([])
@@ -41,7 +48,7 @@ async def test_button_settings(svc, bot) -> None:
 
 
 async def test_button_sent_with_rebuilt_post_but_not_album(svc, bot, clock) -> None:
-    await svc.load_channel_info()
+    await svc.set_buttons(None)
     await svc.set_footer("f")  # forces the rebuild path
     await approved(svc, bot, photo_msg(ADMIN, "P1", "pic", bot=bot))
     msgs = [photo_msg(ADMIN, u, group="g", bot=bot) for u in ("A", "B")]
@@ -60,7 +67,7 @@ async def test_button_sent_with_rebuilt_post_but_not_album(svc, bot, clock) -> N
 
 
 async def test_edit_published_text_post(svc, bot, db) -> None:
-    await svc.load_channel_info()
+    await svc.set_buttons(None)
     await approved(svc, bot, text_msg(ADMIN, "old text", bot))
     await svc.tick()
     ok, text = await svc.edit_post(1, user(ADMIN), "new text", moderator=False)  # submitter edits own post

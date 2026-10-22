@@ -190,7 +190,9 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         if pid is None or not new.strip():
             await reply(update, "Use: /caption &lt;id&gt; &lt;new caption&gt;  ·  /caption &lt;id&gt; off")
             return
-        _, text = await svc.set_caption(pid, update.effective_user, None if new.strip().lower() == "off" else new)
+        word = new.strip().lower()
+        value = None if word == "off" else "" if word in ("remove", "none", "hide") else new
+        _, text = await svc.set_caption(pid, update.effective_user, value)
         await reply(update, text)
 
     @command("schedule", "approver")
@@ -257,11 +259,42 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         pid = _post_id(context.args or [])
         new = rest(update)
         if pid is None or not new.strip():
-            await reply(update, "Use: /editpost &lt;id&gt; &lt;new caption&gt;  ·  /editpost &lt;id&gt; off (original)")
+            await reply(update, "Use: /editpost &lt;id&gt; &lt;new caption&gt;  ·  /editpost &lt;id&gt; remove "
+                                "(no caption)  ·  /editpost &lt;id&gt; off (original)")
             return
         uid = update.effective_user.id
-        _, text = await svc.edit_post(pid, update.effective_user, None if new.strip().lower() == "off" else new,
-                                      moderator=access.can_approve(uid))
+        word = new.strip().lower()
+        value = None if word == "off" else "" if word in ("remove", "none", "hide") else new
+        _, text = await svc.edit_post(pid, update.effective_user, value, moderator=access.can_approve(uid))
+        await reply(update, text)
+
+    @command("clearbuttons", "owner")
+    async def clearbuttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        try:
+            n = max(1, min(int((context.args or ["50"])[0]), 200))
+        except ValueError:
+            n = 50
+        await reply(update, f"🧹 Removing buttons from the last {n} published posts...")
+        cleared, failed = await svc.clear_channel_buttons(n)
+        await reply(update, f"🧹 Done: buttons removed from {cleared} post(s)"
+                            + (f", {failed} could not be changed." if failed else "."))
+
+    @command("replyto", "staff")
+    async def replyto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        args = context.args or []
+        if not args:
+            await reply(update, "Use: /replyto &lt;post id or channel post link&gt; – then send your post\n"
+                                "e.g. /replyto 12 · /replyto https://t.me/yourchannel/123 · /replyto off\n"
+                                "Change a waiting post: /replyto &lt;target&gt; &lt;your post id&gt;")
+            return
+        user = update.effective_user
+        if len(args) >= 2 and args[1].lstrip("#").isdigit():
+            _, text = await svc.set_reply(int(args[1].lstrip("#")), user, args[0],
+                                          moderator=access.can_approve(user.id))
+        elif not access.can_submit(user.id):
+            text = "Only people who can submit posts can use /replyto this way."
+        else:
+            _, text = await svc.arm_reply(user, args[0])
         await reply(update, text)
 
     @command("approval", "owner")
@@ -282,17 +315,21 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         raw = parts[1].strip() if len(parts) > 1 else ""
         usage = ("Use: /setbutton &lt;text&gt; | &lt;url&gt;  (one button per line, max 5)\n"
                  "e.g. /setbutton 📢 Join Channel | https://t.me/yourchannel\n"
-                 "/setbutton default – the automatic Join button · /setbutton off – no buttons")
+                 "/setbutton join – a Join button for this channel · /setbutton off – no buttons")
         if not raw:
             await reply(update, usage)
             return
         if raw.lower() in ("off", "none"):
             await svc.set_buttons([])
-            await reply(update, "🔘 Buttons under posts turned off.")
+            await reply(update, "🔘 Buttons under new posts turned off. To remove them from posts that are already "
+                                "in the channel too: /clearbuttons")
             return
-        if raw.lower() == "default":
-            await svc.set_buttons(None)
-            await reply(update, "🔘 Back to the default Join button.")
+        if raw.lower() in ("join", "default"):
+            if await svc.set_buttons(None):
+                await reply(update, "🔘 A Join button for this channel will appear under every new post.")
+            else:
+                await reply(update, "The channel has no public @username, so I can't build a Join link. "
+                                    "Use /setbutton &lt;text&gt; | &lt;url&gt; instead.")
             return
         rows = []
         for line in raw.splitlines():
