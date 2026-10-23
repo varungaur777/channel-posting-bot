@@ -101,6 +101,7 @@ class PostService:
         self.tz = cfg.tz
         self._submit_lock = asyncio.Lock()
         self.default_buttons: list[dict] = []
+        self.main_channel: dict = {"id": cfg.channel_id, "title": "Main channel", "username": None}
         self.ai = ai  # optional AI caption helper; None or disabled = no AI buttons
         self.reply_targets: dict[int, dict] = {}  # user id -> {"post": id} or {"message_id": id} (/replyto)
 
@@ -129,8 +130,10 @@ class PostService:
         state = await self.db.get_state()
         if post["status"] == APPROVED and eta is None:
             eta = await self.eta_for(post["_id"])
-        text = texts.render_control(post, self.tz, eta=eta, paused=bool(state.get("paused")))
-        markup = (texts.approval_keyboard(post["_id"]) if post["status"] == PENDING
+        channels = await self.channels()
+        names = {c["id"]: c["title"] for c in channels}
+        text = texts.render_control(post, self.tz, eta=eta, paused=bool(state.get("paused")), channel_names=names)
+        markup = (texts.approval_keyboard(post["_id"], channels) if post["status"] == PENDING
                   else texts.scheduled_keyboard(post["_id"]) if post["status"] == APPROVED else None)
         try:
             await self.bot.edit_message_text(chat_id=self.cfg.approval_group_id,
@@ -217,6 +220,7 @@ class PostService:
                 "scheduled_for": None, "caption_override": None, "reminded_at": None,
                 "reply_to_post": (reply_target or {}).get("post"),
                 "reply_to_message_id": (reply_target or {}).get("message_id"),
+                "reply_to_channel": (reply_target or {}).get("channel"),
                 "history": [{"at": now, "event": "submitted", "by": user.id}],
             }
             await self.db.insert_post(post)
@@ -238,7 +242,7 @@ class PostService:
             post = await self.db.update_post(pid, {"approval_message_ids": approval_ids})
             control = await self.bot.send_message(
                 chat_id=self.cfg.approval_group_id, text=texts.render_control(post, self.tz),
-                parse_mode=ParseMode.HTML, reply_markup=texts.approval_keyboard(pid),
+                parse_mode=ParseMode.HTML, reply_markup=texts.approval_keyboard(pid, await self.channels()),
                 reply_parameters=ReplyParameters(message_id=approval_ids[0], allow_sending_without_reply=True),
                 link_preview_options=_NO_PREVIEW,
             )
@@ -294,11 +298,13 @@ class PostService:
             return f"Post #{post_id} not found."
         return f"Post #{post_id} is already {texts.status_text(post['status'])}."
 
-    async def approve(self, post_id: int, user: Any) -> tuple[bool, str]:
+    async def approve(self, post_id: int, user: Any, targets: list[int] | None = None) -> tuple[bool, str]:
+        """Approve a pending post. ``targets`` = channel ids to publish to (None = the main channel)."""
+        targets = await self._valid_targets(targets)
         post = await self.db.transition(
             post_id, [PENDING], APPROVED,
             {"decided_at": self.clock(), "decided_by": user.id, "decided_by_name": _name(user),
-             "retries": 0, "next_attempt_at": None},
+             "retries": 0, "next_attempt_at": None, "targets": targets},
             event="approved", by=user.id,
         )
         if post is None:
@@ -308,9 +314,10 @@ class PostService:
         eta = await self.eta_for(post_id)
         eta_txt = texts.fmt_eta(eta, self.tz, bool(state.get("paused")))
         await self.refresh_control(post, eta)
-        await self.notify_submitter(post, f"✅ Your <b>Post #{post_id}</b> has been approved!\n"
-                                          f"⏰ Expected in the channel: {eta_txt}")
-        return True, f"✅ Post #{post_id} approved. ETA: {eta_txt}"
+        where = await self.target_names(targets)
+        await self.notify_submitter(post, f"✅ Your <b>Post #{post_id}</b> has been approved for {h(where)}!\n"
+                                          f"⏰ Expected: {eta_txt}")
+        return True, f"✅ Post #{post_id} approved for {where}. ETA: {eta_txt}"
 
     async def reject(self, post_id: int, user: Any, reason: str | None = None) -> tuple[bool, str]:
         reason = (reason or "").strip() or None
@@ -531,31 +538,37 @@ class PostService:
             edited = apply_caption(items, text, footer, style)
         if edited is None:
             return False, "This type of post cannot have a caption."
-        ids = post.get("channel_message_ids") or []
         # the message that carries the caption: the one that had it originally, else the first captionable one
         idx = 0 if is_text else next(
             (i for i, it in enumerate(items) if it.get("caption")),
             next((i for i, it in enumerate(items) if it["media_type"] in CAPTIONABLE), 0))
-        if idx >= len(ids):
-            return False, "Could not find this post's message in the channel."
-        markup = await self.post_buttons() if len(ids) == 1 else None
-        try:
-            if is_text:
-                await self.bot.edit_message_text(chat_id=self.cfg.channel_id, message_id=ids[0],
-                                                 text=edited[0]["text"],
-                                                 entities=_ents_or_none(edited[0].get("entities"), self.bot),
-                                                 reply_markup=markup, link_preview_options=None)
-            else:
-                await self.bot.edit_message_caption(chat_id=self.cfg.channel_id, message_id=ids[idx],
-                                                    caption=edited[idx].get("caption") or "",
-                                                    caption_entities=_ents_or_none(
-                                                        edited[idx].get("caption_entities"), self.bot),
-                                                    reply_markup=markup)
-        except BadRequest as e:
-            if "not modified" not in str(e).lower():
-                return False, f"⚠️ Telegram did not accept the edit: {h(e)}"
-        except TelegramError as e:
-            return False, f"⚠️ Could not edit the channel post: {h(e)}"
+        locations = self.published_locations(post)
+        if not locations:
+            return False, "Could not find this post's messages in the channel."
+        errors = []
+        for chat, ids in locations:
+            if idx >= len(ids):
+                errors.append(f"{chat}: message not found")
+                continue
+            markup = await self.post_buttons() if len(ids) == 1 else None
+            try:
+                if is_text:
+                    await self.bot.edit_message_text(chat_id=chat, message_id=ids[0], text=edited[0]["text"],
+                                                     entities=_ents_or_none(edited[0].get("entities"), self.bot),
+                                                     reply_markup=markup, link_preview_options=None)
+                else:
+                    await self.bot.edit_message_caption(chat_id=chat, message_id=ids[idx],
+                                                        caption=edited[idx].get("caption") or "",
+                                                        caption_entities=_ents_or_none(
+                                                            edited[idx].get("caption_entities"), self.bot),
+                                                        reply_markup=markup)
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    errors.append(f"{chat}: {e}")
+            except TelegramError as e:
+                errors.append(f"{chat}: {e}")
+        if len(errors) == len(locations):
+            return False, f"⚠️ Telegram did not accept the edit: {h('; '.join(errors))}"
         updated = await self.db.transition(
             post_id, [PUBLISHED], PUBLISHED,
             {"caption_override": text, "caption_edited_by_name": _name(user) if text is not None else None},
@@ -565,16 +578,19 @@ class PostService:
         if moderator and post.get("submitter_id") != user.id:
             await self.notify_submitter(post, f"📝 The caption of your published <b>Post #{post_id}</b> was edited.")
         log.info("post #%s edited in the channel by %s", post_id, user.id)
+        partial = f" ⚠️ Not changed in: {h('; '.join(errors))}" if errors else ""
         if text == "":
-            return True, f"✏️ Caption of Post #{post_id} removed in the channel."
-        return True, f"✏️ Post #{post_id} updated in the channel."
+            return True, f"✏️ Caption of Post #{post_id} removed in the channel.{partial}"
+        return True, f"✏️ Post #{post_id} updated in the channel.{partial}"
 
     async def parse_reply_target(self, arg: str) -> tuple[dict | None, str]:
         """'12' / '#12' (a post of this bot) or a channel link 'https://t.me/<channel>/123'."""
         arg = arg.strip()
         link = _CHANNEL_LINK.search(arg)
         if link:
-            return {"message_id": int(link.group(1))}, f"channel message {link.group(1)}"
+            chan = link.group(1)
+            chat: int | str = int(f"-100{chan[2:]}") if chan.startswith("c/") else chan
+            return {"message_id": int(link.group(2)), "channel": chat}, f"{chan} message {link.group(2)}"
         try:
             target_id = int(arg.lstrip("#"))
         except ValueError:
@@ -617,7 +633,8 @@ class PostService:
                 return False, "A post cannot reply to itself."
         updated = await self.db.transition(
             post_id, [post["status"]], post["status"],
-            {"reply_to_post": target.get("post"), "reply_to_message_id": target.get("message_id")},
+            {"reply_to_post": target.get("post"), "reply_to_message_id": target.get("message_id"),
+             "reply_to_channel": target.get("channel")},
             event="reply_set", by=user.id,
         )
         if updated is None:
@@ -722,13 +739,95 @@ class PostService:
         await self.db.set_state(approval_required=required)
         log.info("approval %s", "required" if required else "turned off (auto-approve)")
 
+    # ---- channels ---------------------------------------------------------------------------------
+    async def channels(self) -> list[dict]:
+        """All channels posts can go to: the main CHANNEL_ID first, then the ones added with /addchannel."""
+        extra = (await self.db.get_state()).get("extra_channels") or []
+        return [self.main_channel] + [c for c in extra if c["id"] != self.cfg.channel_id]
+
+    def post_targets(self, post: dict) -> list[int]:
+        return [int(t) for t in (post.get("targets") or [])] or [self.cfg.channel_id]
+
+    def published_locations(self, post: dict) -> list[tuple[int, list[int]]]:
+        """(channel id, message ids) for every channel a post is in (older posts: main channel only)."""
+        done = post.get("published_to") or {}
+        if done:
+            return [(int(chat), list(ids)) for chat, ids in done.items() if ids]
+        ids = post.get("channel_message_ids") or []
+        return [(self.cfg.channel_id, list(ids))] if ids else []
+
+    async def _valid_targets(self, targets: list[int] | None) -> list[int]:
+        known = [c["id"] for c in await self.channels()]
+        chosen = [t for t in known if t in set(targets or [])]  # keep the configured order
+        return chosen or [self.cfg.channel_id]
+
+    async def target_names(self, targets: list[int] | None) -> str:
+        names = {c["id"]: c["title"] for c in await self.channels()}
+        return " + ".join(names.get(t, str(t)) for t in (targets or [self.cfg.channel_id]))
+
+    async def resolve_channel(self, ref: str) -> dict | None:
+        """'@username', 'username', a channel id or a t.me link -> a known channel."""
+        ref = ref.strip().removeprefix("https://").removeprefix("t.me/").lstrip("@").lower()
+        for c in await self.channels():
+            if ref in (str(c["id"]), (c.get("username") or "").lower(), c["title"].lower()):
+                return c
+        return None
+
+    async def add_channel(self, ref: str) -> tuple[bool, str]:
+        ref = ref.strip()
+        chat_ref: int | str = int(ref) if ref.lstrip("-").isdigit() else "@" + ref.split("/")[-1].lstrip("@")
+        try:
+            chat = await self.bot.get_chat(chat_ref)
+            me = await self.bot.get_me()
+            member = await self.bot.get_chat_member(chat.id, me.id)
+        except TelegramError as e:
+            return False, (f"Could not open {h(ref)}: {h(e)}\nMake the bot an admin of the channel "
+                           "(Post Messages + Edit Messages + Delete Messages) first.")
+        if chat.type != "channel":
+            return False, "That is not a channel."
+        if member.status != "administrator" or not getattr(member, "can_post_messages", False):
+            return False, f"The bot is not an admin with Post Messages in {h(chat.title)} yet."
+        if chat.id in (self.cfg.storage_channel_id, self.cfg.approval_group_id):
+            return False, "That is the storage channel / approval group, not a posting channel."
+        if chat.id == self.cfg.channel_id:
+            return False, f"{h(chat.title)} is already the main channel."
+        state = await self.db.get_state()
+        extra = [c for c in (state.get("extra_channels") or []) if c["id"] != chat.id]
+        extra.append({"id": chat.id, "title": chat.title, "username": chat.username})
+        await self.db.set_state(extra_channels=extra)
+        log.info("channel added: %s (%s)", chat.title, chat.id)
+        return True, (f"📢 Added <b>{h(chat.title)}</b>. New posts now get a button for it in the approval group "
+                      "(and a ✅ Both/All button).")
+
+    async def remove_channel(self, ref: str) -> tuple[bool, str]:
+        chan = await self.resolve_channel(ref)
+        if chan is None:
+            return False, "Unknown channel. See /channels."
+        if chan["id"] == self.cfg.channel_id:
+            return False, "The main channel comes from CHANNEL_ID and can't be removed here."
+        state = await self.db.get_state()
+        extra = [c for c in (state.get("extra_channels") or []) if c["id"] != chan["id"]]
+        await self.db.set_state(extra_channels=extra)
+        return True, (f"🗑 Removed <b>{h(chan['title'])}</b>. Posts already scheduled for it will still go there; "
+                      "new approvals can't choose it.")
+
+    async def channels_text(self) -> str:
+        lines = ["📢 <b>Channels</b>"]
+        for i, c in enumerate(await self.channels()):
+            uname = f" @{h(c['username'])}" if c.get("username") else ""
+            lines.append(f"{'⭐' if i == 0 else '•'} <b>{h(c['title'])}</b>{uname} (<code>{c['id']}</code>)"
+                         + (" – main" if i == 0 else ""))
+        lines.append("\nOwner: /addchannel @username · /removechannel @username")
+        return "\n".join(lines)
+
     async def load_channel_info(self) -> None:
-        """Remember the channel's public link for /setbutton join."""
+        """Main channel's title / link: for channel buttons and /setbutton join."""
         try:
             chat = await self.bot.get_chat(self.cfg.channel_id)
         except TelegramError as e:
             log.warning("could not read channel info: %s", e)
             return
+        self.main_channel = {"id": chat.id, "title": chat.title or "Main channel", "username": chat.username}
         if chat.username:
             self.default_buttons = [{"text": f"📢 Join {chat.title}", "url": f"https://t.me/{chat.username}"}]
 
@@ -755,13 +854,11 @@ class PostService:
         """Remove inline buttons from the last ``limit`` published single-message posts. Returns (cleared, failed)."""
         posts = await self.db.list_posts([PUBLISHED], limit)
         cleared = failed = 0
-        for post in posts:
-            ids = post.get("channel_message_ids") or []
+        for chat, ids in [loc for post in posts for loc in self.published_locations(post)]:
             if len(ids) != 1:
                 continue  # albums never had buttons
             try:
-                await self.bot.edit_message_reply_markup(chat_id=self.cfg.channel_id, message_id=ids[0],
-                                                         reply_markup=None)
+                await self.bot.edit_message_reply_markup(chat_id=chat, message_id=ids[0], reply_markup=None)
                 cleared += 1
             except RetryAfter as e:
                 await asyncio.sleep(_seconds(e.retry_after) + 1)
@@ -842,13 +939,29 @@ class PostService:
         return None
 
     async def _deliver(self, post: dict) -> list[int]:
+        """Publish to every target channel that does not have the post yet.
+
+        Each channel's message ids are saved as soon as that channel is done, so a retry after a failure
+        only sends to the channels still missing - nobody gets the post twice. Returns the main ids.
+        """
+        done: dict[str, list[int]] = dict(post.get("published_to") or {})
+        for chat in self.post_targets(post):
+            if str(chat) in done:
+                continue
+            ids = await self._deliver_to(post, chat)
+            done[str(chat)] = ids
+            await self.db.update_post(post["_id"], {f"published_to.{chat}": ids})
+        post["published_to"] = done
+        targets = self.post_targets(post)
+        return done.get(str(self.cfg.channel_id)) or done.get(str(targets[0])) or []
+
+    async def _deliver_to(self, post: dict, channel: int) -> list[int]:
         """Copy from the storage snapshot; rebuild from saved file_ids when the snapshot is gone."""
         storage_ids = post.get("storage_message_ids") or []
-        channel = self.cfg.channel_id
         state = await self.db.get_state()
         footer, style = state.get("footer"), format_style(state)
         markup = await self.post_buttons()
-        reply_to = await self._reply_message_id(post)
+        reply_to = await self._reply_message_id(post, channel)
         items = post.get("items") or []
         edited = apply_caption(items, post.get("caption_override"), footer, style)
         if edited is not None or (reply_to and len(storage_ids) > 1):
@@ -871,20 +984,34 @@ class PostService:
                             len(sent), len(storage_ids), post["_id"])
         return await rebuild(self.bot, channel, items, markup, reply_to)
 
-    async def _reply_message_id(self, post: dict) -> int | None:
-        """Channel message this post should reply to (a channel link, or another post once it is published)."""
+    async def _reply_message_id(self, post: dict, channel: int) -> int | None:
+        """Message in ``channel`` this post should reply to (a channel link, or another of our posts)."""
         if post.get("reply_to_message_id"):
-            return int(post["reply_to_message_id"])
+            link_chat = post.get("reply_to_channel")
+            if link_chat is None:  # links saved before multi-channel support point at the main channel
+                link_chat = self.cfg.channel_id
+            if await self._same_channel(link_chat, channel):
+                return int(post["reply_to_message_id"])
+            return None
         target_id = post.get("reply_to_post")
         if not target_id:
             return None
         target = await self.db.get_post(int(target_id))
-        ids = (target or {}).get("channel_message_ids") or []
-        if target and target["status"] == PUBLISHED and ids:
-            return ids[0]
-        log.warning("post #%s should reply to #%s, which is not published - posting without reply",
-                    post["_id"], target_id)
+        if target and target["status"] == PUBLISHED:
+            ids = dict(self.published_locations(target)).get(channel) or []
+            if ids:
+                return ids[0]
+        log.info("post #%s replies to #%s, which is not in channel %s - posting without reply",
+                 post["_id"], target_id, channel)
         return None
+
+    async def _same_channel(self, ref: int | str, channel: int) -> bool:
+        if isinstance(ref, int) or str(ref).lstrip("-").isdigit():
+            return int(ref) == channel
+        for c in await self.channels():
+            if c["id"] == channel and (c.get("username") or "").lower() == str(ref).lower():
+                return True
+        return False
 
     async def _published(self, post: dict, channel_ids: list[int]) -> None:
         now = self.clock()
@@ -895,11 +1022,13 @@ class PostService:
             next_at = current
         updated = await self.db.transition(post["_id"], [PUBLISHING], PUBLISHED,
                                            {"published_at": now, "channel_message_ids": channel_ids,
+                                            "published_to": post.get("published_to") or {},
                                             "next_attempt_at": None})
         await self.db.set_state(last_published_at=now, next_publish_at=next_at)
         log.info("post #%s published (channel msgs %s); next slot %s", post["_id"], channel_ids, next_at.isoformat())
         await self.refresh_control(updated)
-        await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> has been published to the channel!\n"
+        where = await self.target_names(self.post_targets(post))
+        await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> has been published to {h(where)}!\n"
                                           f"✏️ To change its caption: /editpost {post['_id']} &lt;new caption&gt;")
 
     async def _flood_wait(self, post: dict, seconds: float) -> None:
@@ -1120,7 +1249,7 @@ def format_style(state: dict) -> str:
     return style if style in STYLES else "both"
 
 
-_CHANNEL_LINK = re.compile(r"t\.me/(?:c/\d+|[A-Za-z0-9_]+)/(\d+)")
+_CHANNEL_LINK = re.compile(r"t\.me/(c/\d+|[A-Za-z0-9_]+)/(\d+)")
 
 
 def _ents_or_none(raw: list[dict] | None, bot: Any) -> list[MessageEntity] | None:

@@ -147,7 +147,18 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         if pid is None:
             await reply(update, "Use: /approve &lt;id&gt;")
             return
-        _, text = await svc.approve(pid, update.effective_user)
+        targets = None
+        args = context.args or []
+        if len(args) > 1:
+            if args[1].lower() in ("all", "both"):
+                targets = [c["id"] for c in await svc.channels()]
+            else:
+                chan = await svc.resolve_channel(args[1])
+                if chan is None:
+                    await reply(update, "Unknown channel. See /channels.")
+                    return
+                targets = [chan["id"]]
+        _, text = await svc.approve(pid, update.effective_user, targets)
         await reply(update, text)
 
     @command("reject", "approver")
@@ -329,6 +340,26 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
             return
         await svc.set_format_style(arg)
         await reply(update, f"✨ Auto-format: <b>{names[arg]}</b>. Applies to posts published from now on.")
+
+    @command("channels", "staff")
+    async def channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await reply(update, await svc.channels_text())
+
+    @command("addchannel", "owner")
+    async def addchannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not context.args:
+            await reply(update, "Use: /addchannel @username (or the channel id). Make the bot an admin there first.")
+            return
+        _, text = await svc.add_channel(context.args[0])
+        await reply(update, text)
+
+    @command("removechannel", "owner")
+    async def removechannel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not context.args:
+            await reply(update, "Use: /removechannel @username")
+            return
+        _, text = await svc.remove_channel(context.args[0])
+        await reply(update, text)
 
     @command("approval", "owner")
     async def approval_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

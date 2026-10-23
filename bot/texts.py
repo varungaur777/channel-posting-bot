@@ -27,8 +27,18 @@ def status_text(status: str) -> str:
     return f"{STATUS_EMOJI.get(status, '•')} {STATUS_LABEL.get(status, status)}"
 
 
-def approval_keyboard(post_id: int) -> InlineKeyboardMarkup:
-    """Buttons while a post waits for a decision."""
+def approval_keyboard(post_id: int, channels: list[dict] | None = None) -> InlineKeyboardMarkup:
+    """Buttons while a post waits for a decision. With 2+ channels: one approve button per channel + All."""
+    if channels and len(channels) > 1:
+        approve = [InlineKeyboardButton(f"✅ {truncate(c['title'], 22)}", callback_data=f"apc:{c['id']}:{post_id}")
+                   for c in channels]
+        rows = [approve[i:i + 2] for i in range(0, len(approve), 2)]
+        rows.append([InlineKeyboardButton("✅ Both channels" if len(channels) == 2 else "✅ All channels",
+                                          callback_data=f"apc:all:{post_id}")])
+        rows.append([InlineKeyboardButton("❌ Reject", callback_data=f"rj:{post_id}"),
+                     InlineKeyboardButton("✏️ Request Changes", callback_data=f"rc:{post_id}")])
+        rows.append([InlineKeyboardButton("📝 Edit Caption", callback_data=f"ec:{post_id}")])
+        return InlineKeyboardMarkup(rows)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Approve", callback_data=f"ap:{post_id}"),
          InlineKeyboardButton("❌ Reject", callback_data=f"rj:{post_id}")],
@@ -81,7 +91,7 @@ def fmt_eta(eta: tuple[datetime, datetime] | None, tz: tzinfo, paused: bool = Fa
 
 
 def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | None = None,
-                   paused: bool = False) -> str:
+                   paused: bool = False, channel_names: dict[int, str] | None = None) -> str:
     """The control message in the approval group; kept updated through the whole lifecycle."""
     st = post["status"]
     lines = [
@@ -99,6 +109,10 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
                      f" · {fmt_dt(post.get('decided_at'), tz)}")
     if st == "rejected" and post.get("reject_reason"):
         lines.append(f"💬 Reason: {h(post['reject_reason'])}")
+    if channel_names and len(channel_names) > 1 and st not in ("pending", "rejected", "changes_requested"):
+        main = next(iter(channel_names))
+        targets = [int(t) for t in (post.get("targets") or [])] or [main]
+        lines.append("📢 Channels: " + " + ".join(h(channel_names.get(t, str(t))) for t in targets))
     if post.get("reply_to_post"):
         lines.append(f"↩️ Reply to Post #{post['reply_to_post']}")
     elif post.get("reply_to_message_id"):
@@ -176,7 +190,7 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/preview &lt;id&gt; – see exactly how a post will look in the channel\n"
         "/leaderboard [days] – who submitted how much\n\n"
         "<b>Approvers</b>\n"
-        "/approve &lt;id&gt; · /reject &lt;id&gt; [reason]\n"
+        "/approve &lt;id&gt; [all | @channel] · /reject &lt;id&gt; [reason]\n"
         "/postnow &lt;id&gt; – approve (if needed) and publish immediately, skipping the gap\n"
         "/changes &lt;id&gt; &lt;what to change&gt; – send the post back to the submitter with notes\n"
         "/caption &lt;id&gt; &lt;new caption&gt; – replace the caption (/caption &lt;id&gt; off to undo)\n"
@@ -188,6 +202,7 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/setfooter &lt;text&gt; | off – added under every caption, e.g. /setfooter Join @mychannel\n"
         "/report – activity summary of the last 24 hours (also sent to the owner daily)\n"
         "/approval on|off – turn the approval step on or off (off = posts go straight to the queue)\n"
+        "/channels · /addchannel @username · /removechannel @username – post to more than one channel\n"
         "/setbutton &lt;text&gt; | &lt;url&gt; – buttons under every post (one per line) · join · off\n"
         "/clearbuttons [n] – remove buttons from the last n published posts (default 50)\n"
         "/format both|bold|quote|off – caption auto-format (bold headline + quote)\n"
@@ -235,4 +250,7 @@ BOT_COMMANDS = [
     ("adduser", "Owner: /adduser <user_id> [post|approve|both]"),
     ("removeuser", "Owner: /removeuser <user_id> [post|approve|both]"),
     ("users", "Owner: who has access"),
+    ("channels", "Channels posts can go to"),
+    ("addchannel", "Owner: /addchannel @username"),
+    ("removechannel", "Owner: /removechannel @username"),
 ]

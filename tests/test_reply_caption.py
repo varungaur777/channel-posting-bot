@@ -39,7 +39,8 @@ async def test_next_post_replies_to_published_post(svc, bot, db, clock) -> None:
 
 
 async def test_reply_by_channel_link_and_album(svc, bot, db) -> None:
-    ok, _ = await svc.arm_reply(user(ADMIN), "https://t.me/spitting_fact/777")
+    await svc.load_channel_info()  # main channel is @mychannel in the fake bot
+    ok, _ = await svc.arm_reply(user(ADMIN), "https://t.me/mychannel/777")
     assert ok
     msgs = [photo_msg(ADMIN, u, group="g", bot=bot) for u in ("A", "B")]
     await svc.submit(user(ADMIN), msgs)

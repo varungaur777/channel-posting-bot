@@ -177,6 +177,13 @@ dabao to wahi lag jata hai. Chalu karne ke liye:
 3. Bot restart: current run cancel karo aur `gh workflow run bot.yml` (ya agle 6-ghante restart ka wait).
 Default model `claude-opus-5-5`; doosra chahiye to Variable `AI_MODEL` (jaise `claude-sonnet-5-5`). Key hatao = feature band.
 
+**📢 Do (ya zyada) channels:** `/addchannel @username` se doosra channel jodo (pehle bot ko wahan admin banao:
+Post + Edit + Delete Messages). Phir approval group mein har post pe har channel ka button aata hai –
+**✅ 𝙎𝙋𝙄𝙏𝙏𝙄𝙉𝙂 𝙁𝘼𝘾𝙏 · ✅ The GeoSight · ✅ Both channels** – jo dabao, post wahin jata hai (gap/queue same rehti hai).
+Command se: `/approve 12 all`, `/approve 12 @GeoSight`. Ek channel fail ho to sirf wahi dobara try hota hai (duplicate nahi).
+`/editpost`, `/replyto` aur `/clearbuttons` sab channels pe chalte hain. List: `/channels`, hatao: `/removechannel @username`.
+Bina choice ke (`/approve 12`, ⚡ Post Now on a pending post, `/approval off`) post sirf main channel (`CHANNEL_ID`) mein jata hai.
+
 **Approval group ke buttons:**
 - Pending post: **✅ Approve** · **❌ Reject** · **✏️ Request Changes** · **📝 Edit Caption** · **⚡ Approve & Post Now**
 - Scheduled post: **⚡ Post Now** · **🕒 Schedule** · **⬆️ Move to Top** · **📝 Edit Caption** · **🚫 Cancel**

@@ -45,11 +45,18 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
         if not access.can_approve(q.from_user.id):
             await q.answer("You don't have permission to approve or reject posts.", show_alert=True)
             return
-        action, _, raw_id = (q.data or "").partition(":")
+        parts = (q.data or "").split(":")
+        action, raw_id = parts[0], parts[-1]
         try:
             post_id = int(raw_id)
         except ValueError:
             await q.answer()
+            return
+        if action == "apc":  # approve for one channel / all channels
+            channels = [c["id"] for c in await svc.channels()]
+            targets = channels if parts[1] == "all" else [int(parts[1])]
+            ok, text = await svc.approve(post_id, q.from_user, targets)
+            await q.answer(text[:190], show_alert=not ok)
             return
         if action in PROMPTS:
             text, placeholder = PROMPTS[action]
@@ -100,7 +107,8 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access) ->
             _, result = await svc.schedule_post(post_id, user, text)
         await msg.reply_text(result, parse_mode=ParseMode.HTML)
 
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(ap|rj|pn|cx|rc|ec|sc|tp):\d+$"))
+    app.add_handler(CallbackQueryHandler(
+        on_button, pattern=r"^((ap|rj|pn|cx|rc|ec|sc|tp):\d+|apc:(all|-?\d+):\d+)$"))
     app.add_handler(MessageHandler(
         filters.Chat(cfg.approval_group_id) & filters.REPLY & filters.TEXT & ~filters.COMMAND
         & filters.UpdateType.MESSAGE, on_prompt_reply))
