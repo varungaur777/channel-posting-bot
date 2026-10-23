@@ -184,6 +184,12 @@ Command se: `/approve 12 all`, `/approve 12 @GeoSight`. Ek channel fail ho to si
 `/editpost`, `/replyto` aur `/clearbuttons` sab channels pe chalte hain. List: `/channels`, hatao: `/removechannel @username`.
 Bina choice ke (`/approve 12`, ⚡ Post Now on a pending post, `/approval off`) post sirf main channel (`CHANNEL_ID`) mein jata hai.
 
+**Har channel ki apni settings:**
+- **Gap:** `/setinterval 30 35 @GeoSight` – har channel apne gap se chalta hai. "Both" wala post pehle jis channel ka slot
+  khali ho wahan jata hai, doosre mein uske apne gap ke baad. `/stats` mein har channel ka next slot dikhta hai.
+- **Footer:** `/setfooter @GeoSight Join for more @GeoSight` – sirf us channel ke liye. `/setfooter <text>` = baaki sab ke
+  liye. `/setfooter @GeoSight off` = us channel mein footer nahi, `/setfooter @GeoSight default` = general footer.
+
 **Approval group ke buttons:**
 - Pending post: **✅ Approve** · **❌ Reject** · **✏️ Request Changes** · **📝 Edit Caption** · **⚡ Approve & Post Now**
 - Scheduled post: **⚡ Post Now** · **🕒 Schedule** · **⬆️ Move to Top** · **📝 Edit Caption** · **🚫 Cancel**

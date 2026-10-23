@@ -172,6 +172,22 @@ class Database:
         docs = await self.posts.find(flt).sort([("decided_at", ASCENDING), ("_id", ASCENDING)]).limit(1).to_list(1)
         return _fix_dates(docs[0]) if docs else None
 
+    async def next_due_for(self, channel: int, now: datetime, *, is_main: bool) -> dict | None:
+        """First approved post that still has to go to ``channel`` and is not waiting for a retry backoff.
+
+        Posts without a ``targets`` list (approved before multi-channel support) belong to the main channel.
+        """
+        for_channel: list[dict] = [{"targets": channel}]
+        if is_main:
+            for_channel += [{"targets": None}, {"targets": []}]
+        flt = {
+            "status": APPROVED, "scheduled_for": None, f"published_to.{channel}": {"$exists": False},
+            "$and": [{"$or": [{"next_attempt_at": None}, {"next_attempt_at": {"$lte": now}}]},
+                     {"$or": for_channel}],
+        }
+        docs = await self.posts.find(flt).sort([("decided_at", ASCENDING), ("_id", ASCENDING)]).limit(1).to_list(1)
+        return _fix_dates(docs[0]) if docs else None
+
     async def next_timed(self, now: datetime) -> dict | None:
         """First approved post whose fixed publish time (/schedule) has come."""
         flt = {"status": APPROVED, "scheduled_for": {"$lte": now},

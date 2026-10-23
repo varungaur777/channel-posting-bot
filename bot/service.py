@@ -63,6 +63,7 @@ from bot.utils import (
     CAPTIONABLE,
     STYLES,
     apply_caption,
+    as_utc,
     content_hash,
     content_type,
     extract_items,
@@ -152,28 +153,66 @@ class PostService:
         return (float(st.get("min_interval") or self.cfg.min_interval_min),
                 float(st.get("max_interval") or self.cfg.max_interval_min))
 
+    def _interval_for(self, state: dict, channel: int) -> tuple[float, float]:
+        """Gap for one channel: /setinterval <min> <max> @channel, else the main interval."""
+        main = (float(state.get("min_interval") or self.cfg.min_interval_min),
+                float(state.get("max_interval") or self.cfg.max_interval_min))
+        if channel == self.cfg.channel_id:
+            return main
+        own = (state.get("channel_intervals") or {}).get(str(channel))
+        return (float(own[0]), float(own[1])) if own else main
+
+    def _npa(self, state: dict, channel: int) -> datetime | None:
+        """When ``channel`` may get its next regular post."""
+        if channel == self.cfg.channel_id:
+            return state.get("next_publish_at")
+        return as_utc((state.get("channel_next") or {}).get(str(channel)))
+
+    def _footer_for(self, state: dict, channel: int) -> str | None:
+        """/setfooter @channel <text> wins over the general footer ('' = no footer in that channel)."""
+        own = state.get("channel_footers") or {}
+        if own.get(str(channel)) is not None:
+            return own[str(channel)] or None
+        return state.get("footer")
+
+    def _remaining(self, post: dict, known: set[int] | None = None) -> list[int]:
+        """Target channels that do not have the post yet."""
+        done = post.get("published_to") or {}
+        return [t for t in self.post_targets(post) if str(t) not in done and (known is None or t in known)]
+
     async def schedule(self) -> list[tuple[dict, Eta]]:
-        """Scheduled posts in publish order with an (earliest, latest) ETA window."""
+        """Scheduled posts with an (earliest, latest) ETA window. Every channel keeps its own gap, so a post
+        that goes to several channels is "done" when its slowest channel gets it."""
         now = self.clock()
         queue = await self.db.queue()
         state = await self.db.get_state()
-        mn, mx = await self.interval()
         quiet = quiet_window(state)
-        npa = state.get("next_publish_at")
-        early = late = max(now, npa) if npa else now
+        known = {c["id"] for c in await self.channels()}
+        running: dict[int, tuple[datetime, datetime]] = {}
         out: list[tuple[dict, Eta]] = []
-        k = 0
         for post in queue:
             if post.get("scheduled_for"):  # fixed time: not part of the gap sequence
                 out.append((post, (post["scheduled_for"], post["scheduled_for"])))
                 continue
-            if k:
-                early += timedelta(minutes=mn)
-                late += timedelta(minutes=mx)
-            k += 1
-            early, late = skip_quiet(early, quiet, self.tz), skip_quiet(late, quiet, self.tz)
+            earliest, latest = [], []
+            for chan in self._remaining(post, known):
+                mn, mx = self._interval_for(state, chan)
+                if chan in running:
+                    early, late = running[chan]
+                    early, late = early + timedelta(minutes=mn), late + timedelta(minutes=mx)
+                else:
+                    npa = self._npa(state, chan)
+                    early = late = max(now, npa) if npa else now
+                early, late = skip_quiet(early, quiet, self.tz), skip_quiet(late, quiet, self.tz)
+                running[chan] = (early, late)
+                earliest.append(early)
+                latest.append(late)
+            if not earliest:
+                continue
+            e, l_ = max(earliest), max(latest)
             nat = post.get("next_attempt_at")
-            e, l_ = (max(early, nat), max(late, nat)) if nat else (early, late)
+            if nat:
+                e, l_ = max(e, nat), max(l_, nat)
             out.append((post, (e, l_)))
         out.sort(key=lambda pe: (pe[1][0], pe[0]["_id"]))
         return out
@@ -531,12 +570,15 @@ class PostService:
             if len(text) > limit:
                 return False, f"The new caption must be at most {limit} characters."
         state = await self.db.get_state()
-        footer, style = state.get("footer"), format_style(state)
-        if text is None:  # back to the original caption (+ formatting + footer)
-            edited = apply_caption(items, None, footer, style) or [dict(i) for i in items]
-        else:
-            edited = apply_caption(items, text, footer, style)
-        if edited is None:
+        style = format_style(state)
+
+        def edited_for(chat: int) -> list[dict] | None:
+            footer = self._footer_for(state, chat)
+            if text is None:  # back to the original caption (+ formatting + footer)
+                return apply_caption(items, None, footer, style) or [dict(i) for i in items]
+            return apply_caption(items, text, footer, style)
+
+        if edited_for(self.cfg.channel_id) is None:
             return False, "This type of post cannot have a caption."
         # the message that carries the caption: the one that had it originally, else the first captionable one
         idx = 0 if is_text else next(
@@ -551,6 +593,7 @@ class PostService:
                 errors.append(f"{chat}: message not found")
                 continue
             markup = await self.post_buttons() if len(ids) == 1 else None
+            edited = edited_for(chat) or [dict(i) for i in items]
             try:
                 if is_text:
                     await self.bot.edit_message_text(chat_id=chat, message_id=ids[0], text=edited[0]["text"],
@@ -651,7 +694,8 @@ class PostService:
             return False, f"Post #{post_id} not found."
         state = await self.db.get_state()
         items = post.get("items") or []
-        edited = apply_caption(items, post.get("caption_override"), state.get("footer"), format_style(state))
+        footer = self._footer_for(state, self.post_targets(post)[0])
+        edited = apply_caption(items, post.get("caption_override"), footer, format_style(state))
         markup = await self.post_buttons()
         try:
             if edited is None and post.get("storage_message_ids"):
@@ -808,8 +852,10 @@ class PostService:
         state = await self.db.get_state()
         extra = [c for c in (state.get("extra_channels") or []) if c["id"] != chan["id"]]
         await self.db.set_state(extra_channels=extra)
-        return True, (f"🗑 Removed <b>{h(chan['title'])}</b>. Posts already scheduled for it will still go there; "
-                      "new approvals can't choose it.")
+        for post in await self.db.posts_where({"status": {"$in": [PENDING, APPROVED]}, "targets": chan["id"]}):
+            left = [t for t in self.post_targets(post) if t != chan["id"]] or [self.cfg.channel_id]
+            await self.db.update_post(post["_id"], {"targets": left})
+        return True, f"🗑 Removed <b>{h(chan['title'])}</b>. Waiting posts no longer go there."
 
     async def channels_text(self) -> str:
         lines = ["📢 <b>Channels</b>"]
@@ -875,14 +921,21 @@ class PostService:
     async def set_format_style(self, style: str) -> None:
         await self.db.set_state(format_style=style)
 
-    async def set_footer(self, text: str | None) -> None:
-        await self.db.set_state(footer=(text or "").strip() or None)
+    async def set_footer(self, text: str | None, channel: int | None = None) -> None:
+        """General footer, or for one channel: text, "" = none there, None = use the general one."""
+        if channel is None:
+            await self.db.set_state(footer=(text or "").strip() or None)
+        else:
+            await self.db.set_state(**{f"channel_footers.{channel}": None if text is None else text.strip()})
 
     async def set_quiet_hours(self, start: int | None, end: int | None) -> None:
         await self.db.set_state(quiet_start=start, quiet_end=end)
 
-    async def set_interval(self, mn: float, mx: float) -> None:
-        await self.db.set_state(min_interval=mn, max_interval=mx)
+    async def set_interval(self, mn: float, mx: float, channel: int | None = None) -> None:
+        if channel is None or channel == self.cfg.channel_id:
+            await self.db.set_state(min_interval=mn, max_interval=mx)
+        else:
+            await self.db.set_state(**{f"channel_intervals.{channel}": [mn, mx]})
         log.info("interval set to %s-%s min", mn, mx)
 
     # ================================================================== publishing
@@ -892,26 +945,32 @@ class PostService:
         if state.get("paused"):
             return None
         now = self.clock()
-        candidate = await self.db.next_timed(now)  # a fixed publish time wins over the gap and quiet hours
-        if candidate is None:
-            npa = state.get("next_publish_at")
+        timed = await self.db.next_timed(now)  # a fixed publish time wins over the gap and quiet hours
+        if timed is not None:
+            post = await self.db.transition(timed["_id"], [APPROVED], PUBLISHING,
+                                            {"publishing_started_at": now, "posted_now": False}, event="publishing")
+            return await self._publish_claimed(post) if post else None
+        if in_quiet(now, quiet_window(state), self.tz):
+            return None
+        for chan in [c["id"] for c in await self.channels()]:  # every channel has its own gap
+            npa = self._npa(state, chan)
             if npa and now < npa:
-                return None
-            if in_quiet(now, quiet_window(state), self.tz):
-                return None
-            candidate = await self.db.next_due(now)
-        if candidate is None:
-            return None
-        post = await self.db.transition(candidate["_id"], [APPROVED], PUBLISHING,
-                                        {"publishing_started_at": now, "posted_now": False}, event="publishing")
-        if post is None:  # cancelled / claimed in the meantime
-            return None
-        return await self._publish_claimed(post)
+                continue
+            candidate = await self.db.next_due_for(chan, now, is_main=chan == self.cfg.channel_id)
+            if candidate is None:
+                continue
+            post = await self.db.transition(candidate["_id"], [APPROVED], PUBLISHING,
+                                            {"publishing_started_at": now, "posted_now": False}, event="publishing")
+            if post is None:  # cancelled / claimed in the meantime
+                continue
+            return await self._publish_claimed(post, only=[chan])
+        return None
 
-    async def _publish_claimed(self, post: dict) -> int | None:
+    async def _publish_claimed(self, post: dict, only: list[int] | None = None) -> int | None:
+        """Send a claimed post to its channels (``only`` = just these channels this time)."""
         pid = post["_id"]
         try:
-            channel_ids = await self._deliver(post)
+            delivered = await self._deliver(post, only)
         except asyncio.CancelledError:
             await self._needs_review(post, "the bot stopped while this post was being published – "
                                            "it may already be in the channel")
@@ -934,32 +993,54 @@ class PostService:
             log.exception("unexpected error publishing #%s", pid)
             await self._needs_review(post, f"unexpected error: {e!r}")
         else:
-            await self._published(post, channel_ids)
+            known = {c["id"] for c in await self.channels()}
+            if self._remaining(post, known):
+                await self._published_partly(post, delivered)
+            else:
+                await self._published(post)
             return pid
         return None
 
-    async def _deliver(self, post: dict) -> list[int]:
-        """Publish to every target channel that does not have the post yet.
+    async def _deliver(self, post: dict, only: list[int] | None = None) -> list[int]:
+        """Publish to the target channels that do not have the post yet (``only``: just these).
 
-        Each channel's message ids are saved as soon as that channel is done, so a retry after a failure
-        only sends to the channels still missing - nobody gets the post twice. Returns the main ids.
+        Each channel's message ids are saved, and its next slot set, as soon as that channel is done - so a
+        retry after a failure only sends to the channels still missing and nobody gets the post twice.
+        Returns the channels sent to in this call.
         """
         done: dict[str, list[int]] = dict(post.get("published_to") or {})
+        delivered: list[int] = []
         for chat in self.post_targets(post):
-            if str(chat) in done:
+            if str(chat) in done or (only is not None and chat not in only):
                 continue
             ids = await self._deliver_to(post, chat)
             done[str(chat)] = ids
+            post["published_to"] = dict(done)
             await self.db.update_post(post["_id"], {f"published_to.{chat}": ids})
-        post["published_to"] = done
-        targets = self.post_targets(post)
-        return done.get(str(self.cfg.channel_id)) or done.get(str(targets[0])) or []
+            await self._channel_published(chat)
+            delivered.append(chat)
+        return delivered
+
+    async def _channel_published(self, channel: int) -> None:
+        """Start the channel's gap: next regular post there in uniform(min, max) minutes."""
+        now = self.clock()
+        state = await self.db.get_state()
+        mn, mx = self._interval_for(state, channel)
+        next_at = now + timedelta(minutes=self.rng.uniform(mn, mx))
+        current = self._npa(state, channel)
+        if current and current > next_at:  # a Post Now never pulls the regular queue earlier
+            next_at = current
+        if channel == self.cfg.channel_id:
+            await self.db.set_state(last_published_at=now, next_publish_at=next_at)
+        else:
+            await self.db.set_state(**{"last_published_at": now, f"channel_next.{channel}": next_at})
+        log.info("channel %s: next regular post at %s", channel, next_at.isoformat())
 
     async def _deliver_to(self, post: dict, channel: int) -> list[int]:
         """Copy from the storage snapshot; rebuild from saved file_ids when the snapshot is gone."""
         storage_ids = post.get("storage_message_ids") or []
         state = await self.db.get_state()
-        footer, style = state.get("footer"), format_style(state)
+        footer, style = self._footer_for(state, channel), format_style(state)
         markup = await self.post_buttons()
         reply_to = await self._reply_message_id(post, channel)
         items = post.get("items") or []
@@ -1013,23 +1094,31 @@ class PostService:
                 return True
         return False
 
-    async def _published(self, post: dict, channel_ids: list[int]) -> None:
+    async def _published(self, post: dict) -> None:
+        """Every target channel has the post."""
         now = self.clock()
-        mn, mx = await self.interval()
-        next_at = now + timedelta(minutes=self.rng.uniform(mn, mx))
-        current = (await self.db.get_state()).get("next_publish_at")
-        if current and current > next_at:  # a Post Now never pulls the regular queue earlier
-            next_at = current
+        done = post.get("published_to") or {}
+        targets = self.post_targets(post)
+        main_ids = done.get(str(self.cfg.channel_id)) or done.get(str(targets[0])) or []
         updated = await self.db.transition(post["_id"], [PUBLISHING], PUBLISHED,
-                                           {"published_at": now, "channel_message_ids": channel_ids,
-                                            "published_to": post.get("published_to") or {},
-                                            "next_attempt_at": None})
-        await self.db.set_state(last_published_at=now, next_publish_at=next_at)
-        log.info("post #%s published (channel msgs %s); next slot %s", post["_id"], channel_ids, next_at.isoformat())
+                                           {"published_at": now, "channel_message_ids": main_ids,
+                                            "published_to": done, "next_attempt_at": None, "last_error": None})
+        log.info("post #%s published everywhere (%s)", post["_id"], {k: v for k, v in done.items()})
         await self.refresh_control(updated)
         where = await self.target_names(self.post_targets(post))
         await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> has been published to {h(where)}!\n"
                                           f"✏️ To change its caption: /editpost {post['_id']} &lt;new caption&gt;")
+
+    async def _published_partly(self, post: dict, delivered: list[int]) -> None:
+        """Some channels have the post; the others get it when their own gap allows."""
+        updated = await self.db.transition(post["_id"], [PUBLISHING], APPROVED,
+                                           {"next_attempt_at": None, "last_error": None}, event="published_partly")
+        await self.refresh_control(updated)
+        if delivered:
+            here = await self.target_names(delivered)
+            rest = await self.target_names(self._remaining(updated or post))
+            await self.notify_submitter(post, f"📢 Your <b>Post #{post['_id']}</b> is now in {h(here)}. "
+                                              f"{h(rest)} gets it next – each channel keeps its own posting gap.")
 
     async def _flood_wait(self, post: dict, seconds: float) -> None:
         until = self.clock() + timedelta(seconds=seconds + 1)
@@ -1121,17 +1210,23 @@ class PostService:
     async def stats_text(self) -> str:
         counts = await self.db.count_by_status()
         state = await self.db.get_state()
-        mn, mx = await self.interval()
-        npa = state.get("next_publish_at")
         now = self.clock()
-        slot = "now (as soon as a post is ready)" if not npa or npa <= now else \
-            f"{fmt_dt(npa, self.tz)} (in {fmt_delta(npa - now)})"
+
+        def slot(npa: datetime | None) -> str:
+            return "now (as soon as a post is ready)" if not npa or npa <= now else \
+                f"{fmt_dt(npa, self.tz)} (in {fmt_delta(npa - now)})"
+
+        chans = await self.channels()
         lines = ["📊 <b>Stats</b>"]
         lines += [f"{texts.status_text(s)}: <b>{counts.get(s, 0)}</b>" for s in STATUSES]
         lines += [
             "",
-            f"⏱ Interval: {mn:g}–{mx:g} min",
-            f"⏭ Next publish slot: {slot}",
+            *[line for c in chans for line in (
+                f"📢 <b>{h(c['title'])}</b>: gap {self._interval_for(state, c['id'])[0]:g}–"
+                f"{self._interval_for(state, c['id'])[1]:g} min · next slot {slot(self._npa(state, c['id']))}"
+                + (f" · footer: {h(truncate(self._footer_for(state, c['id']), 40))}"
+                   if len(chans) > 1 and self._footer_for(state, c["id"]) else ""),
+            )],
             f"📢 Last published: {fmt_dt(state.get('last_published_at'), self.tz)}",
             f"⏸ Paused: {'YES' if state.get('paused') else 'no'}",
             f"🌙 Quiet hours: {_quiet_text(quiet_window(state))}",

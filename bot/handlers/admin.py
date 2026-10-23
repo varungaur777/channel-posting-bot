@@ -250,20 +250,30 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
 
     @command("setfooter", "owner")
     async def setfooter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        parts = (update.effective_message.text or "").split(maxsplit=1)
-        text = parts[1].strip() if len(parts) > 1 else ""
+        parts = (update.effective_message.text or "").split(maxsplit=2)
+        chan = None
+        if len(parts) > 2:  # "/setfooter @GeoSight <text>" = only for that channel
+            chan = await svc.resolve_channel(parts[1])
+        text = (parts[2] if chan else " ".join(parts[1:])).strip()
         if not text:
-            await reply(update, "Use: /setfooter &lt;text&gt;  (e.g. /setfooter Join @mychannel)  ·  /setfooter off")
+            await reply(update, "Use: /setfooter &lt;text&gt; – for all channels\n"
+                                "/setfooter @channel &lt;text&gt; – only for that channel\n"
+                                "/setfooter off · /setfooter @channel off · /setfooter @channel default")
             return
+        where = f" for <b>{h(chan['title'])}</b>" if chan else ""
         if text.lower() == "off":
-            await svc.set_footer(None)
-            await reply(update, "🔖 Footer turned off.")
+            await svc.set_footer("" if chan else None, chan["id"] if chan else None)
+            await reply(update, f"🔖 Footer turned off{where}.")
+            return
+        if chan and text.lower() == "default":
+            await svc.set_footer(None, chan["id"])
+            await reply(update, f"🔖 {h(chan['title'])} uses the general footer again.")
             return
         if len(text) > 200:
             await reply(update, "Footer is too long (max 200 characters).")
             return
-        await svc.set_footer(text)
-        await reply(update, f"🔖 Footer set. It will be added under every caption and text post:\n\n{h(text)}")
+        await svc.set_footer(text, chan["id"] if chan else None)
+        await reply(update, f"🔖 Footer set{where}. It will be added under every caption and text post:\n\n{h(text)}")
 
     @command("editpost", "staff")
     async def editpost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -444,13 +454,21 @@ def register(app: Application, cfg: Config, svc: PostService, access: Access, re
         try:
             mn, mx = float(args[0]), float(args[1])
         except (IndexError, ValueError):
-            await reply(update, "Use: /setinterval &lt;min&gt; &lt;max&gt;  (minutes, e.g. /setinterval 10 15)")
+            await reply(update, "Use: /setinterval &lt;min&gt; &lt;max&gt; [@channel]  (minutes)\n"
+                                "e.g. /setinterval 10 15 · /setinterval 30 35 @GeoSight")
             return
         if not (0 < mn <= mx <= 1440):
             await reply(update, "Invalid values: need 0 &lt; min ≤ max ≤ 1440.")
             return
-        await svc.set_interval(mn, mx)
-        await reply(update, f"⏱ Interval set to {mn:g}–{mx:g} min. It applies from the next publish onwards.")
+        chan = None
+        if len(args) > 2:
+            chan = await svc.resolve_channel(args[2])
+            if chan is None:
+                await reply(update, "Unknown channel. See /channels.")
+                return
+        await svc.set_interval(mn, mx, chan["id"] if chan else None)
+        where = f" for <b>{h(chan['title'])}</b>" if chan else ""
+        await reply(update, f"⏱ Gap{where} set to {mn:g}–{mx:g} min. It applies from that channel's next post.")
 
     @command("adduser", "owner")
     async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

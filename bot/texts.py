@@ -113,6 +113,9 @@ def render_control(post: dict, tz: tzinfo, *, eta: tuple[datetime, datetime] | N
         main = next(iter(channel_names))
         targets = [int(t) for t in (post.get("targets") or [])] or [main]
         lines.append("📢 Channels: " + " + ".join(h(channel_names.get(t, str(t))) for t in targets))
+        done = [int(c) for c in (post.get("published_to") or {})]
+        if st == "approved" and done:
+            lines.append("✅ Already in: " + " + ".join(h(channel_names.get(t, str(t))) for t in done))
     if post.get("reply_to_post"):
         lines.append(f"↩️ Reply to Post #{post['reply_to_post']}")
     elif post.get("reply_to_message_id"):
@@ -197,9 +200,9 @@ def help_text(min_iv: float, max_iv: float) -> str:
         "/schedule &lt;id&gt; &lt;18:30 | 25-10 18:30 | +90 | +2h | off&gt; – publish at a fixed time\n"
         "/top &lt;id&gt; – move a scheduled post to the front of the queue\n\n"
         "<b>Owner only</b>\n"
-        "/retry &lt;id&gt; · /pause · /resume · /setinterval &lt;min&gt; &lt;max&gt;\n"
+        "/retry &lt;id&gt; · /pause · /resume · /setinterval &lt;min&gt; &lt;max&gt; [@channel]\n"
         "/quiethours &lt;start&gt; &lt;end&gt; | off – e.g. /quiethours 23 7: no regular posts at night\n"
-        "/setfooter &lt;text&gt; | off – added under every caption, e.g. /setfooter Join @mychannel\n"
+        "/setfooter [@channel] &lt;text&gt; | off – added under every caption, e.g. /setfooter Join @mychannel\n"
         "/report – activity summary of the last 24 hours (also sent to the owner daily)\n"
         "/approval on|off – turn the approval step on or off (off = posts go straight to the queue)\n"
         "/channels · /addchannel @username · /removechannel @username – post to more than one channel\n"
@@ -240,9 +243,9 @@ BOT_COMMANDS = [
     ("retry", "Owner: /retry <id>"),
     ("pause", "Owner: pause publishing"),
     ("resume", "Owner: resume publishing"),
-    ("setinterval", "Owner: /setinterval <min> <max>"),
+    ("setinterval", "Owner: /setinterval <min> <max> [@channel]"),
     ("quiethours", "Owner: /quiethours 23 7 or off"),
-    ("setfooter", "Owner: /setfooter <text> or off"),
+    ("setfooter", "Owner: /setfooter [@channel] <text>"),
     ("approval", "Owner: /approval on or off"),
     ("setbutton", "Owner: buttons under every post"),
     ("clearbuttons", "Owner: remove buttons from channel posts"),
